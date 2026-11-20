@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const CONFIG_FILE = "sub2api.json";
@@ -19,10 +20,19 @@ export interface Sub2ApiConfig {
   apiBase: string;
   token: string;
   foldVariants: boolean;
+  hideFoldedVariants: boolean;
+  hidePlaceholders: boolean;
+  fallbackOnRateLimit: boolean;
+  include: string[];
+  exclude: string[];
+  autoRefreshHours: number;
+  statusBar: boolean;
   search: SearchConfig;
 }
 
 type JsonObject = Record<string, unknown>;
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
 export function asObject(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -30,36 +40,66 @@ export function asObject(value: unknown): JsonObject | undefined {
     : undefined;
 }
 
-function normalizeRoot(baseURL: string): string {
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Resolves literal tokens or environment references (`$VAR` / `${VAR}`).
+ */
+export function resolveEnvToken(raw: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) return "";
+
+  const braced = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(trimmed);
+  if (braced) {
+    return (env[braced[1]!] ?? "").trim();
+  }
+  const simple = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(trimmed);
+  if (simple) {
+    return (env[simple[1]!] ?? "").trim();
+  }
+  return trimmed;
+}
+
+export function normalizeRoot(baseURL: string): string {
   let url: URL;
   try {
     url = new URL(baseURL.trim());
   } catch {
     throw new Error(`Invalid baseURL in ${CONFIG_FILE}`);
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-    throw new Error("baseURL must be an HTTPS URL without credentials, query, or fragment");
+  const isHttpLoopback = url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+  if ((url.protocol !== "https:" && !isHttpLoopback) || url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      "baseURL must be an HTTPS URL (or HTTP for localhost/127.0.0.1) without credentials, query, or fragment",
+    );
   }
   return url.href.replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
-/**
- * Reads ~/.pi/agent/sub2api.json.
- * Supports both unified flat schema:
- *   { "baseURL": "...", "token": "...", "provider": { "id": "sub2api", "foldVariants": true }, "search": { ... } }
- * and legacy nested schema:
- *   { "sub2api": { "baseURL": "...", "token": "..." } }
- */
-export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
-  const configPath = join(getAgentDir(), CONFIG_FILE);
-  let raw: string;
-  try {
-    raw = await readFile(configPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw new Error(`Cannot read ${CONFIG_FILE}`);
+export function redactToken(text: string, ...tokens: Array<string | undefined>): string {
+  let out = text;
+  for (const token of tokens) {
+    if (token && token.length >= 4) {
+      out = out.replaceAll(token, "[REDACTED]");
+    }
   }
+  return out;
+}
 
+export function getConfigPath(): string {
+  return join(getAgentDir(), CONFIG_FILE);
+}
+
+export function parseSub2ApiConfig(
+  raw: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Sub2ApiConfig {
   let parsed: JsonObject | undefined;
   try {
     parsed = asObject(JSON.parse(raw));
@@ -74,7 +114,7 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
   if (typeof parsed.baseURL !== "string") {
     const legacyKey = Object.keys(parsed).find((k) => {
       const entry = asObject(parsed![k]);
-      return typeof entry?.baseURL === "string" && typeof entry?.token === "string";
+      return typeof entry?.baseURL === "string";
     });
     if (legacyKey) {
       baseObj = asObject(parsed[legacyKey])!;
@@ -83,14 +123,22 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
   }
 
   const baseURL = baseObj.baseURL;
-  const token = baseObj.token;
-  if (typeof baseURL !== "string" || typeof token !== "string" || !token.trim()) {
-    throw new Error(`${CONFIG_FILE} requires baseURL and token`);
+  if (typeof baseURL !== "string" || !baseURL.trim()) {
+    throw new Error(`${CONFIG_FILE} requires baseURL`);
+  }
+
+  const rawToken = typeof baseObj.token === "string" ? baseObj.token : undefined;
+  const cleanToken = resolveEnvToken(rawToken, env) || (env.SUB2API_TOKEN ?? "").trim();
+  if (!cleanToken) {
+    throw new Error(
+      rawToken?.startsWith("$")
+        ? `${CONFIG_FILE} token reference "${rawToken.trim()}" is not set in environment`
+        : `${CONFIG_FILE} requires token (or SUB2API_TOKEN environment variable)`,
+    );
   }
 
   const root = normalizeRoot(baseURL);
   const apiBase = `${root}/v1`;
-  const cleanToken = token.trim();
 
   const providerSection = asObject(parsed.provider) ?? asObject(baseObj.provider);
   const providerId =
@@ -99,6 +147,22 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
       : defaultProviderId;
   const foldVariants =
     typeof providerSection?.foldVariants === "boolean" ? providerSection.foldVariants : true;
+  const hideFoldedVariants =
+    typeof providerSection?.hideFoldedVariants === "boolean" ? providerSection.hideFoldedVariants : true;
+  const hidePlaceholders =
+    typeof providerSection?.hidePlaceholders === "boolean" ? providerSection.hidePlaceholders : true;
+  const fallbackOnRateLimit =
+    typeof providerSection?.fallbackOnRateLimit === "boolean" ? providerSection.fallbackOnRateLimit : false;
+  const include = asStringArray(providerSection?.include);
+  const exclude = asStringArray(providerSection?.exclude);
+  const autoRefreshHours =
+    typeof providerSection?.autoRefreshHours === "number" &&
+    Number.isFinite(providerSection.autoRefreshHours) &&
+    providerSection.autoRefreshHours >= 0
+      ? providerSection.autoRefreshHours
+      : 24;
+  const statusBar =
+    typeof providerSection?.statusBar === "boolean" ? providerSection.statusBar : false;
 
   const searchSection = asObject(parsed.search) ?? asObject(baseObj.search);
   const searchEnabled =
@@ -107,10 +171,8 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
     typeof searchSection?.endpoint === "string" && searchSection.endpoint.trim()
       ? searchSection.endpoint.trim()
       : `${apiBase}/alpha/search`;
-  const searchToken =
-    typeof searchSection?.token === "string" && searchSection.token.trim()
-      ? searchSection.token.trim()
-      : cleanToken;
+  const rawSearchToken = typeof searchSection?.token === "string" ? searchSection.token : undefined;
+  const searchToken = resolveEnvToken(rawSearchToken, env) || cleanToken;
   const searchModel =
     typeof searchSection?.model === "string" && searchSection.model.trim()
       ? searchSection.model.trim()
@@ -127,6 +189,13 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
     apiBase,
     token: cleanToken,
     foldVariants,
+    hideFoldedVariants,
+    hidePlaceholders,
+    fallbackOnRateLimit,
+    include,
+    exclude,
+    autoRefreshHours,
+    statusBar,
     search: {
       enabled: searchEnabled,
       endpoint: searchEndpoint,
@@ -138,7 +207,34 @@ export async function readSub2ApiConfig(): Promise<Sub2ApiConfig | undefined> {
   };
 }
 
-/** Escape Pi's API-key interpolation syntax for literal keys. */
-export function escapePiApiKey(token: string): string {
-  return token.replace(/\$/g, "$$$$").replace(/^!/, "$!");
+/**
+ * Reads ~/.pi/agent/sub2api.json.
+ * Returns undefined if the file does not exist.
+ */
+export async function readSub2ApiConfig(configPath = getConfigPath()): Promise<Sub2ApiConfig | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(configPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(`Cannot read ${CONFIG_FILE}`);
+  }
+  return parseSub2ApiConfig(raw);
+}
+
+/**
+ * Atomically writes ~/.pi/agent/sub2api.json with 0600 permissions.
+ */
+export async function writeSub2ApiConfig(
+  payload: Record<string, unknown>,
+  configPath = getConfigPath(),
+): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+  const tempPath = `${configPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await rename(tempPath, configPath);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+  }
 }

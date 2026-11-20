@@ -1,3 +1,4 @@
+import type { JsonObject } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
@@ -6,13 +7,16 @@ import type { WebRunCommand } from "./commands.js";
 
 export interface FormattedToolOutput {
   content: Array<{ type: "text"; text: string }>;
-  structuredContent: {
-    output?: string;
-    results: SearchResult[];
-  };
+  structuredContent: JsonObject;
   details: Record<string, unknown>;
   isError?: boolean;
 }
+
+const MAX_RESULTS_BY_LENGTH: Record<"short" | "medium" | "long", number> = {
+  short: 8,
+  medium: 15,
+  long: 25,
+};
 
 export function cleanCitations(rawText: string): string {
   if (!rawText) return "";
@@ -39,8 +43,9 @@ export function cleanCitations(rawText: string): string {
     .replace(/[\uE200-\uE202]/g, "");
 }
 
-function formatSearchResults(results: SearchResult[]): string {
-  return results
+function formatSearchResults(results: SearchResult[], maxItems: number): string {
+  const shown = results.slice(0, maxItems);
+  const body = shown
     .map((item, idx) => {
       const num = idx + 1;
       const title = item.title || item.url || `Result ${num}`;
@@ -49,28 +54,48 @@ function formatSearchResults(results: SearchResult[]): string {
       return `[${num}] ${title}\n${urlLine}${snippetLine}`.trim();
     })
     .join("\n\n");
+
+  if (results.length > shown.length) {
+    return `${body}\n\n(Showing ${shown.length} of ${results.length} results; pass response_length="medium" or "long" for more.)`;
+  }
+  return body;
 }
 
 export function formatWebToolResult(command: WebRunCommand, response: SearchResponse): FormattedToolOutput {
-  let primaryText = "";
+  const responseLength = command.response_length ?? "short";
+  const maxItems = MAX_RESULTS_BY_LENGTH[responseLength];
   const isSearchAction = Boolean(command.search_query?.length || command.image_query?.length);
 
+  let primaryText = "";
   if (isSearchAction && response.results && response.results.length > 0) {
-    primaryText = formatSearchResults(response.results);
+    primaryText = formatSearchResults(response.results, maxItems);
   } else if (typeof response.output === "string" && response.output.trim().length > 0) {
     primaryText = cleanCitations(response.output.trim());
   } else if (response.results && response.results.length > 0) {
-    primaryText = formatSearchResults(response.results);
+    primaryText = formatSearchResults(response.results, maxItems);
   } else {
     primaryText = "No output or structured web results returned.";
   }
 
+  const boundedResults = isSearchAction ? response.results.slice(0, maxItems) : response.results;
+  const structuredResults = boundedResults.map((r) => {
+    const entry: JsonObject = {};
+    if (r.ref_id !== undefined) entry.ref_id = r.ref_id;
+    if (r.url !== undefined) entry.url = r.url;
+    if (r.title !== undefined) entry.title = r.title;
+    if (r.snippet !== undefined) entry.snippet = r.snippet;
+    if (r.domain !== undefined) entry.domain = r.domain;
+    if (r.type !== undefined) entry.type = r.type;
+    return entry;
+  });
+  const structuredContent: JsonObject = {
+    ...(response.output !== undefined ? { output: response.output } : {}),
+    results: structuredResults,
+  };
+
   return {
     content: [{ type: "text", text: primaryText }],
-    structuredContent: {
-      output: response.output,
-      results: response.results,
-    },
+    structuredContent,
     details: {
       command,
       results: response.results,
@@ -107,6 +132,10 @@ export function describeCommandStatus(command: WebRunCommand): string {
   if (command.image_query && command.image_query.length > 0) {
     const q = command.image_query.map(formatQueryWithFilters).join(", ");
     parts.push(`Searching images for ${q}`);
+  }
+  if (command.find && command.find.length > 0) {
+    const finds = command.find.map((f) => `"${f.pattern}" in ${f.ref_id}`).join(", ");
+    parts.push(`Finding ${finds}`);
   }
   if (command.click && command.click.length > 0) {
     const clicks = command.click.map((c) => `element #${c.id} in ${c.ref_id}`).join(", ");
@@ -146,14 +175,12 @@ export function makeWebToolCallRenderer(toolName: string) {
         : [];
       target = queries.join(", ");
     } else {
-      const urlStr =
-        typeof args.url === "string"
-          ? args.url
-          : typeof args.url_or_ref_id === "string"
-            ? args.url_or_ref_id
-            : "";
+      const urlStr = typeof args.url === "string" ? args.url : "";
       const suffixes: string[] = [];
       if (typeof args.click_id === "number") suffixes.push(`(click #${args.click_id})`);
+      if (typeof args.pattern === "string" && args.pattern.trim()) {
+        suffixes.push(`(find "${args.pattern.trim()}")`);
+      }
       if (typeof args.lineno === "number") suffixes.push(`(line ${args.lineno})`);
       const suffix = suffixes.length > 0 ? ` ${suffixes.join(" ")}` : "";
       target = `${urlStr}${suffix}`;
@@ -177,7 +204,7 @@ export function makeWebToolRenderer(title: string) {
 
     if (result.isError) {
       const text = result.content?.[0]?.type === "text" ? result.content[0].text : "Web search failed.";
-      return new Text(theme.fg("error", text), 0, 0);
+      return new Text(theme.fg("error", text ?? "Web search failed."), 0, 0);
     }
 
     try {
@@ -194,7 +221,7 @@ export function makeWebToolRenderer(title: string) {
       const isBrowse = Boolean(details.command?.open || details.command?.find || details.command?.click);
       const queryLabel = isBrowse ? "Target:" : "Query:";
 
-      const icon = (theme as any).status?.success ?? "✓";
+      const icon = (theme as { status?: { success?: string } }).status?.success ?? "✓";
       const label = theme.fg("toolTitle", theme.bold(title));
       const count =
         results.length > 0
@@ -206,7 +233,7 @@ export function makeWebToolRenderer(title: string) {
         lines.push(`${theme.fg("muted", queryLabel)} ${theme.fg("text", query)}`);
       }
 
-      const rawText = result.content?.[0]?.type === "text" ? result.content[0].text.trim() : "";
+      const rawText = result.content?.[0]?.type === "text" ? (result.content[0].text ?? "").trim() : "";
       if (rawText) {
         const allLines = rawText.split("\n");
         const visible = expanded ? allLines : allLines.slice(0, MAX_COLLAPSED_LINES);
@@ -226,7 +253,7 @@ export function makeWebToolRenderer(title: string) {
       return new Text(lines.join("\n"), 0, 0);
     } catch {
       const text = result.content?.[0]?.type === "text" ? result.content[0].text : "";
-      return new Text(text, 0, 0);
+      return new Text(text ?? "", 0, 0);
     }
   };
 }

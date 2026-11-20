@@ -11,7 +11,7 @@ export const SearchQueryItem = Type.Object({
 });
 
 export const ImageQueryItem = Type.Object({
-  q: Type.String({ description: "Image search query (e.g. reference art, game design assets, sprites)" }),
+  q: Type.String({ description: "Image search query (e.g. reference art, diagrams, assets)" }),
   domains: Type.Optional(
     Type.Array(Type.String(), { description: "Filter results to specific domains (e.g. ['unsplash.com'])" }),
   ),
@@ -28,13 +28,13 @@ export const ClickItem = Type.Object({
 });
 
 export const FindItem = Type.Object({
-  ref_id: Type.String({ description: "Document reference" }),
-  pattern: Type.String({ description: "Text to find" }),
+  ref_id: Type.String({ description: "Document reference ID (turnXviewY) or URL" }),
+  pattern: Type.String({ description: "Text to find within the document" }),
 });
 
 export const ResponseLengthEnum = Type.Union(
   [Type.Literal("short"), Type.Literal("medium"), Type.Literal("long")],
-  { description: "Output size: 'short' (default), 'medium'/'long' for in-depth research" },
+  { description: "Output size: 'short' (default for search), 'medium'/'long' for in-depth research" },
 );
 
 export const SearchTypeEnum = Type.Union([Type.Literal("web"), Type.Literal("image")], {
@@ -44,9 +44,8 @@ export const SearchTypeEnum = Type.Union([Type.Literal("web"), Type.Literal("ima
 export type SearchType = Static<typeof SearchTypeEnum>;
 
 export const SearchToolParameters = Type.Object({
-  queries: Type.Array(SearchQueryItem, { description: "List of search queries" }),
+  queries: Type.Array(SearchQueryItem, { description: "List of search queries", minItems: 1 }),
   type: Type.Optional(SearchTypeEnum),
-  image_queries: Type.Optional(Type.Array(ImageQueryItem, { description: "Optional legacy image queries" })),
   response_length: Type.Optional(ResponseLengthEnum),
 });
 
@@ -54,11 +53,16 @@ export type SearchToolParams = Static<typeof SearchToolParameters>;
 
 export const BrowseToolParameters = Type.Object({
   url: Type.String({
-    description: "Full http/https URL of the web page to read (or the page URL to click a link within)",
+    description: "Full http/https URL of the web page to read, search within, or click a link inside",
   }),
   click_id: Type.Optional(
     Type.Number({
       description: "Optional numbered link ID to click and follow from a previously opened page",
+    }),
+  ),
+  pattern: Type.Optional(
+    Type.String({
+      description: "Optional text pattern to search for within a previously opened page",
     }),
   ),
   lineno: Type.Optional(
@@ -110,7 +114,6 @@ export function searchParamsToWebRunCommand(params: SearchToolParams): WebRunCom
 
   return {
     search_query: params.queries,
-    ...(params.image_queries?.length ? { image_query: params.image_queries } : {}),
     response_length: params.response_length ?? "short",
   };
 }
@@ -121,6 +124,13 @@ export function browseParamsToWebRunCommand(params: BrowseToolParams, resolvedRe
   if (typeof params.click_id === "number") {
     return {
       click: [{ ref_id: refId, id: params.click_id }],
+      response_length: params.response_length ?? "long",
+    };
+  }
+
+  if (typeof params.pattern === "string" && params.pattern.trim()) {
+    return {
+      find: [{ ref_id: refId, pattern: params.pattern.trim() }],
       response_length: params.response_length ?? "long",
     };
   }

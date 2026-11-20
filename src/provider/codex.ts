@@ -1,5 +1,5 @@
+import type { ProviderStreams } from "@earendil-works/pi-ai";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
-import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { asObject } from "../config.js";
 import {
   lookupMetadata,
@@ -9,6 +9,7 @@ import {
   type ChatModel,
   type ManifestEntry,
   type MetadataIndex,
+  type ParsedEfforts,
 } from "./catalog.js";
 
 const CODEX_MODEL_PATTERN = /^(?:chatgpt|codex|gpt|o\d)(?:-|$)/i;
@@ -21,11 +22,17 @@ export function isCodexModel(id: string, antigravityIds: ReadonlySet<string>): b
   return CODEX_MODEL_PATTERN.test(id);
 }
 
-export async function fetchCodexManifest(root: string, token: string): Promise<ManifestEntry[]> {
+export async function fetchCodexManifest(
+  root: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ManifestEntry[]> {
+  const timeout = AbortSignal.timeout(15_000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response = await fetch(`${root}/backend-api/codex/models`, {
     headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
     redirect: "error",
-    signal: AbortSignal.timeout(15_000),
+    signal: combinedSignal,
   });
   if (!response.ok) {
     throw new Error(`Codex manifest fetch failed (HTTP ${response.status})`);
@@ -57,14 +64,30 @@ export async function fetchCodexManifest(root: string, token: string): Promise<M
   return entries;
 }
 
-function buildCodexThinkingMap(efforts: string[] | undefined): ChatModel["thinkingLevelMap"] {
-  if (!efforts || efforts.length === 0) {
-    return { off: "none", minimal: "low", xhigh: "xhigh" };
+export function buildCodexThinkingMap(
+  parsed: ParsedEfforts | undefined,
+  officialMap?: ChatModel["thinkingLevelMap"],
+): ChatModel["thinkingLevelMap"] {
+  const officialOff = officialMap && "off" in officialMap ? officialMap.off : undefined;
+
+  if (!parsed || parsed.efforts.length === 0) {
+    if (officialMap) return { ...officialMap };
+    return {
+      off: parsed?.supportsNone ? "none" : (officialOff ?? null),
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+    };
   }
-  const set = new Set(efforts);
+
+  const set = new Set(parsed.efforts);
+  const offMapping = parsed.supportsNone ? "none" : (officialOff ?? null);
+
   return {
-    off: "none",
-    minimal: set.has("low") ? "low" : null,
+    off: offMapping,
+    minimal: set.has("minimal") ? "minimal" : set.has("low") ? "low" : null,
     low: set.has("low") ? "low" : null,
     medium: set.has("medium") ? "medium" : null,
     high: set.has("high") ? "high" : null,
@@ -74,6 +97,7 @@ function buildCodexThinkingMap(efforts: string[] | undefined): ChatModel["thinki
 }
 
 export function buildCodexModel(
+  providerId: string,
   id: string,
   manifest: ManifestEntry | undefined,
   official: MetadataIndex,
@@ -100,10 +124,10 @@ export function buildCodexModel(
       DEFAULT_MAX_TOKENS,
   );
 
-  const efforts = parseSupportedEfforts(manifest?.supported_reasoning_levels);
+  const parsedEfforts = parseSupportedEfforts(manifest?.supported_reasoning_levels);
   const reasoning =
-    efforts !== undefined
-      ? efforts.length > 0
+    parsedEfforts !== undefined
+      ? parsedEfforts.efforts.length > 0
       : meta?.reasoning ?? /^(?:codex-|gpt-[56]|o\d)/i.test(id);
 
   const input = parseInputModalities(manifest?.input_modalities) ?? meta?.input ?? ["text", "image"];
@@ -112,24 +136,37 @@ export function buildCodexModel(
     id,
     name: manifest?.display_name || id,
     api: "openai-codex-responses",
+    provider: providerId,
     baseUrl: apiBase,
     reasoning,
     input,
     cost: meta?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
     maxTokens,
-    thinkingLevelMap: reasoning ? buildCodexThinkingMap(efforts) : undefined,
+    thinkingLevelMap: reasoning
+      ? buildCodexThinkingMap(parsedEfforts, codexMeta?.thinkingLevelMap ?? openaiMeta?.thinkingLevelMap)
+      : undefined,
+    promptCache: meta?.promptCache,
+    inputLimits: meta?.inputLimits,
+    samplingParams: meta?.samplingParams,
+    samplingParamsByThinkingLevel: meta?.samplingParamsByThinkingLevel,
   };
+}
+
+export function rewriteCodexEndpointUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  if (!url.pathname.endsWith("/codex/responses")) {
+    throw new Error(`Unexpected Sub2API Codex endpoint path: ${url.pathname}`);
+  }
+  url.pathname = `${url.pathname.slice(0, -"/codex/responses".length)}/responses`;
+  return url.href;
 }
 
 /**
  * Reuses Pi's official OpenAI Codex Responses adapter and rewrites the target
- * URL from `<apiBase>/codex/responses` to Sub2API's `<apiBase>/responses`.
+ * URL from `<baseUrl>/codex/responses` to Sub2API's `<baseUrl>/responses`.
  */
-export function createCodexStreamSimple(
-  apiBase: string,
-  token: string,
-): NonNullable<ProviderConfig["streamSimple"]> {
+export function createCodexStreams(token: string): ProviderStreams {
   const adapter = openAICodexResponsesApi();
   // Adapter requires a ChatGPT account claim JWT; this local placeholder is never sent upstream.
   const account = Buffer.from(
@@ -137,23 +174,30 @@ export function createCodexStreamSimple(
   ).toString("base64url");
   const placeholder = `eyJhbGciOiJub25lIn0.${account}.local`;
 
-  return (model, context, options) =>
-    adapter.streamSimple(model, context, {
+  const wrapOptions = <T extends { apiKey?: string; transport?: unknown; fetch?: typeof fetch }>(
+    options: T | undefined,
+  ): T => {
+    const authToken = options?.apiKey ?? token;
+    const upstreamFetch = options?.fetch ?? fetch;
+    return {
       ...options,
       apiKey: placeholder,
       transport: "sse",
-      fetch: (input, init) => {
-        const url = input instanceof Request ? input.url : String(input);
-        if (url !== `${apiBase}/codex/responses`) {
-          throw new Error("Unexpected Sub2API Codex endpoint");
-        }
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = input instanceof Request ? input.url : String(input);
+        const rewrittenUrl = rewriteCodexEndpointUrl(rawUrl);
         const headers = new Headers(
           init?.headers ?? (input instanceof Request ? input.headers : undefined),
         );
-        headers.set("Authorization", `Bearer ${options?.apiKey ?? token}`);
+        headers.set("Authorization", `Bearer ${authToken}`);
         headers.delete("chatgpt-account-id");
-        const upstreamFetch = options?.fetch ?? fetch;
-        return upstreamFetch(`${apiBase}/responses`, { ...init, headers, redirect: "error" });
+        return upstreamFetch(rewrittenUrl, { ...init, headers, redirect: "error" });
       },
-    });
+    } as T;
+  };
+
+  return {
+    stream: (model, context, options) => adapter.stream(model, context, wrapOptions(options)),
+    streamSimple: (model, context, options) => adapter.streamSimple(model, context, wrapOptions(options)),
+  };
 }

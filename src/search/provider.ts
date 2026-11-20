@@ -1,15 +1,15 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { SearchConfig } from "../config.js";
+import { redactToken, type SearchConfig } from "../config.js";
 import { serializeWebRunPayload, type WebRunCommand } from "./commands.js";
 
-export interface SearchResult {
+export type SearchResult = {
   type?: string;
   ref_id?: string;
   url?: string;
   title?: string;
   snippet?: string;
   domain?: string;
-}
+};
 
 export interface SearchResponse {
   output?: string;
@@ -22,6 +22,20 @@ export interface WebSearchProvider {
     signalOrOptions?: AbortSignal | { sessionId?: string },
     maybeSignal?: AbortSignal,
   ): Promise<SearchResponse>;
+}
+
+function parseRetryAfterMs(headerValue: string | null): number | undefined {
+  if (!headerValue) return undefined;
+  const seconds = Number(headerValue.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(3_000, Math.round(seconds * 1_000));
+  }
+  const dateMs = Date.parse(headerValue);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    if (delta >= 0) return Math.min(3_000, delta);
+  }
+  return undefined;
 }
 
 export class CodexWebSearchProvider implements WebSearchProvider {
@@ -43,7 +57,10 @@ export class CodexWebSearchProvider implements WebSearchProvider {
     );
     const onExternalAbort = () => controller.abort(signal?.reason);
     if (signal) {
-      if (signal.aborted) throw signal.reason ?? new Error("Request cancelled");
+      if (signal.aborted) {
+        clearTimeout(timeoutId);
+        throw signal.reason ?? new Error("Request cancelled");
+      }
       signal.addEventListener("abort", onExternalAbort, { once: true });
     }
 
@@ -62,10 +79,12 @@ export class CodexWebSearchProvider implements WebSearchProvider {
     try {
       let response: Response | null = null;
       let lastErr: unknown;
+      let retryDelayMs = 0;
 
       for (let attempt = 0; attempt <= 2; attempt++) {
         if (attempt > 0) {
-          await sleep(500 * attempt, undefined, { signal: controller.signal });
+          await sleep(retryDelayMs || 500 * attempt, undefined, { signal: controller.signal });
+          retryDelayMs = 0;
         }
         try {
           response = await fetch(this.config.endpoint, {
@@ -75,7 +94,13 @@ export class CodexWebSearchProvider implements WebSearchProvider {
             redirect: "error",
             signal: controller.signal,
           });
-          if (response.status === 502 || response.status === 503 || response.status === 504) {
+          if (
+            response.status === 429 ||
+            response.status === 502 ||
+            response.status === 503 ||
+            response.status === 504
+          ) {
+            retryDelayMs = parseRetryAfterMs(response.headers.get("retry-after")) ?? 500 * (attempt + 1);
             continue;
           }
           break;
@@ -86,12 +111,13 @@ export class CodexWebSearchProvider implements WebSearchProvider {
       }
 
       if (!response) {
-        throw lastErr ?? new Error("No response received from search endpoint");
+        const msg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? "No response received");
+        throw new Error(redactToken(msg, this.config.token));
       }
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        throw new Error(`[HTTP ${response.status}] ${text.slice(0, 300)}`);
+        throw new Error(redactToken(`[HTTP ${response.status}] ${text.slice(0, 300)}`, this.config.token));
       }
 
       const body = (await response.json()) as Record<string, unknown>;
@@ -101,6 +127,11 @@ export class CodexWebSearchProvider implements WebSearchProvider {
         output: typeof body?.output === "string" ? body.output : undefined,
         results,
       };
+    } catch (err) {
+      if (err instanceof Error) {
+        err.message = redactToken(err.message, this.config.token);
+      }
+      throw err;
     } finally {
       clearTimeout(timeoutId);
       if (signal) signal.removeEventListener("abort", onExternalAbort);
