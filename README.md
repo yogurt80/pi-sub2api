@@ -42,3 +42,13 @@ pi install git:github.com/yogurt80/pi-sub2api
 - `baseURL` requires `https://` (or `http://` for `localhost` / `127.0.0.1`).
 
 Run `/sub2api-refresh` in Pi to fetch and cache the latest model catalog (`~/.pi/agent/sub2api-catalog.json`).
+
+## Standalone model viewer
+
+Load the single-file extension with `pi -e ./src/model-view.ts` from this checkout, or copy `src/model-view.ts` into Pi's extensions directory.
+
+- `/model-view` opens a searchable list of all registered chat, image, and classifier models.
+- `/model-view current` opens the currently selected model.
+- `/model-view <provider>/<model-id>` opens a specific model. Prefix the selector with `image:` or `classifier:` to select that model type explicitly.
+
+The JSON view reads Pi's runtime registry, including built-in models, models from `models.json`, and models registered by extensions. It shows the API adapter, base URL, limits, thinking levels, sampling defaults, cache settings, and cost metadata where applicable. Header values and URL credentials, queries, and fragments are masked. The view can also show the last routed response under the active virtual model selection when recorded in the session. Press Esc to close.
