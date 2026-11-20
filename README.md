@@ -43,9 +43,9 @@ pi install git:github.com/yogurt80/pi-sub2api
 
 Run `/sub2api-refresh` in Pi to fetch and cache the latest model catalog (`~/.pi/agent/sub2api-catalog.json`).
 
-## Standalone model viewer
+## Model viewer
 
-Load the single-file extension with `pi -e ./src/model-view.ts` from this checkout, or copy `src/model-view.ts` into Pi's extensions directory.
+Installing `pi-sub2api` automatically loads `/model-view`. To run the viewer on its own, use `pi -e ./src/model-view.ts` from this checkout.
 
 - `/model-view` opens a searchable list of all registered chat, image, and classifier models.
 - `/model-view current` opens the currently selected model.

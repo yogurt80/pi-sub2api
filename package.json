@@ -34,7 +34,8 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "./src/model-view.ts"
     ]
   }
 }
