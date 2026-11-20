@@ -1,0 +1,40 @@
+{
+  "name": "pi-sub2api",
+  "version": "1.0.0",
+  "description": "Sub2API provider (Codex + Antigravity with virtual model folding) and standalone Codex web search for Pi coding agent",
+  "main": "src/index.ts",
+  "type": "module",
+  "files": [
+    "src/**/*",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "sub2api",
+    "codex",
+    "antigravity",
+    "web-search"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.34.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
