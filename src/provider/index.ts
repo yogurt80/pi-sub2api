@@ -4,15 +4,8 @@ import {
   googleGenerativeAIApi,
   openAIResponsesApi,
 } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  asObject,
-  normalizeRoot,
-  redactToken,
-  resolveEnvToken,
-  writeSub2ApiConfig,
-  type Sub2ApiConfig,
-} from "../config.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { asObject, redactToken, type Sub2ApiConfig } from "../config.js";
 import {
   disambiguateModelNames,
   getCatalogPath,
@@ -41,14 +34,14 @@ import {
   isManifestPlaceholder,
   type VariantGroup,
 } from "./antigravity.js";
-import {
-  fetchSub2ApiUsage,
-  formatStatusBarText,
-  formatUsageReport,
-  type CatalogSummaryInfo,
-} from "./usage.js";
 
 const EFFORT_SUFFIX = /-(?:low|medium|high|xhigh|disabled)$/i;
+
+interface CatalogSummary {
+  visibleCount: number;
+  physicalCount: number;
+  virtualCount: number;
+}
 
 async function fetchV1Ids(apiBase: string, token: string, signal?: AbortSignal): Promise<string[]> {
   const timeout = AbortSignal.timeout(10_000);
@@ -212,20 +205,19 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
   const responsesApi = openAIResponsesApi();
 
   let registeredVirtualIds = new Set<string>();
-  let lastSummary: CatalogSummaryInfo | undefined;
+  let hasCatalog = false;
   let lastSnapshotFetchedAt = 0;
 
-  const applySnapshot = (snapshot: Sub2ApiCatalogSnapshot): CatalogSummaryInfo => {
+  const applySnapshot = (snapshot: Sub2ApiCatalogSnapshot): CatalogSummary => {
     const built = buildProviderCatalog(snapshot, official, config);
-    const summary: CatalogSummaryInfo = {
+    const summary: CatalogSummary = {
       visibleCount: built.visibleCount,
       physicalCount: built.physicalModels.length,
       virtualCount: built.virtualGroups.length,
-      fetchedAt: snapshot.fetchedAt,
     };
     if (!built.physicalModels.length) return summary;
 
-    lastSummary = summary;
+    hasCatalog = true;
     lastSnapshotFetchedAt = snapshot.fetchedAt;
 
     const nextVirtualIds = new Set(built.virtualGroups.map((g) => g.baseId));
@@ -283,11 +275,11 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
   };
 
   let refreshing = false;
-  const runRefresh = async (options?: { silent?: boolean; signal?: AbortSignal }) => {
+  const runRefresh = async (signal?: AbortSignal) => {
     if (refreshing) return undefined;
     refreshing = true;
     try {
-      const snapshot = await fetchCatalogSnapshot(config, options?.signal);
+      const snapshot = await fetchCatalogSnapshot(config, signal);
       const summary = applySnapshot(snapshot);
       if (!summary.physicalCount) {
         throw new Error("Sub2API returned no chat models");
@@ -306,32 +298,14 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
   } else {
     // First-run bootstrap: attempt a quick initial fetch so /model & --list-models work immediately
     try {
-      await runRefresh({ silent: true, signal: AbortSignal.timeout(8_000) });
+      await runRefresh(AbortSignal.timeout(8_000));
     } catch {
-      // Will retry or allow manual /sub2api-refresh in session
+      // Will retry on session_start or via /sub2api-refresh
     }
   }
 
-  // Optional status bar refresh with 60s cooldown
-  let lastStatusBarUpdate = 0;
-  const updateStatusBar = async (ctx: ExtensionContext, force = false) => {
-    if (!config.statusBar || !ctx.hasUI) return;
-    const now = Date.now();
-    if (!force && now - lastStatusBarUpdate < 60_000) return;
-    lastStatusBarUpdate = now;
-    try {
-      const usage = await fetchSub2ApiUsage(config.root, config.token);
-      const text = formatStatusBarText(usage);
-      if (text) ctx.ui.setStatus("sub2api", text);
-    } catch {
-      // Keep previous status silently on transient errors
-    }
-  };
-
   pi.on("session_start", async (_event, ctx) => {
-    void updateStatusBar(ctx, true);
-
-    const needsInitial = !lastSummary;
+    const needsInitial = !hasCatalog;
     const maxAgeMs = config.autoRefreshHours * 3_600_000;
     const isStale =
       config.autoRefreshHours > 0 &&
@@ -339,7 +313,7 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
       Date.now() - lastSnapshotFetchedAt > maxAgeMs;
 
     if (needsInitial || isStale) {
-      void runRefresh({ silent: !needsInitial })
+      void runRefresh()
         .then((summary) => {
           if (summary && needsInitial && ctx.hasUI) {
             ctx.ui.notify(
@@ -356,12 +330,6 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
         });
     }
   });
-
-  if (config.statusBar) {
-    pi.on("turn_end", async (_event, ctx) => {
-      void updateStatusBar(ctx, false);
-    });
-  }
 
   pi.registerCommand("sub2api-refresh", {
     description: "Fetch and refresh Sub2API Codex & Antigravity model catalog",
@@ -383,107 +351,6 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
         const message = redactToken(raw, config.token);
         ctx.ui.notify(`Sub2API model refresh failed. ${message}`, "error");
       }
-    },
-  });
-
-  pi.registerCommand("sub2api-status", {
-    description: "Show Sub2API balance, today's usage, top models, and catalog status",
-    handler: async (_args, ctx) => {
-      try {
-        const usage = await fetchSub2ApiUsage(config.root, config.token);
-        const report = formatUsageReport(usage, lastSummary);
-        ctx.ui.notify(report || "Sub2API is reachable, but no usage data was returned.", "info");
-        if (config.statusBar) {
-          const text = formatStatusBarText(usage);
-          if (text) ctx.ui.setStatus("sub2api", text);
-        }
-      } catch (error) {
-        const raw = error instanceof Error ? error.message : "Unknown error";
-        ctx.ui.notify(`Sub2API status check failed. ${redactToken(raw, config.token)}`, "error");
-      }
-    },
-  });
-}
-
-export function registerSub2ApiSetupCommand(
-  pi: ExtensionAPI,
-  existingConfig?: Sub2ApiConfig,
-): void {
-  pi.registerCommand("sub2api-setup", {
-    description: "Configure Sub2API gateway URL and API key (~/.pi/agent/sub2api.json)",
-    handler: async (_args, ctx) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify("Interactive UI is required for /sub2api-setup.", "error");
-        return;
-      }
-
-      const rawUrl = await ctx.ui.input(
-        "Sub2API Gateway URL (e.g. https://sub2api.example.com)",
-        existingConfig?.root ?? "https://",
-      );
-      if (!rawUrl || !rawUrl.trim()) return;
-
-      let root: string;
-      try {
-        root = normalizeRoot(rawUrl);
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : "Invalid URL", "error");
-        return;
-      }
-
-      const rawToken = await ctx.ui.input(
-        "Sub2API API Key (literal sk-... or $SUB2API_TOKEN)",
-        "$SUB2API_TOKEN",
-      );
-      if (!rawToken || !rawToken.trim()) return;
-
-      const resolvedToken = resolveEnvToken(rawToken);
-      if (!resolvedToken) {
-        ctx.ui.notify(
-          `Token "${rawToken.trim()}" could not be resolved from environment.`,
-          "error",
-        );
-        return;
-      }
-
-      // Verify connectivity before writing config
-      try {
-        const res = await fetch(`${root}/v1/models`, {
-          headers: { Authorization: `Bearer ${resolvedToken}`, Accept: "application/json" },
-          redirect: "error",
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) {
-          ctx.ui.notify(`Gateway rejected token (HTTP ${res.status}). Config was not saved.`, "error");
-          return;
-        }
-      } catch (error) {
-        const msg = redactToken(error instanceof Error ? error.message : String(error), resolvedToken);
-        ctx.ui.notify(`Cannot reach ${root}: ${msg}`, "error");
-        return;
-      }
-
-      await writeSub2ApiConfig({
-        baseURL: root,
-        token: rawToken.trim(),
-        provider: {
-          id: existingConfig?.providerId ?? "sub2api",
-          foldVariants: existingConfig?.foldVariants ?? true,
-          hideFoldedVariants: existingConfig?.hideFoldedVariants ?? true,
-          hidePlaceholders: existingConfig?.hidePlaceholders ?? true,
-        },
-        search: {
-          enabled: existingConfig?.search.enabled ?? true,
-          model: existingConfig?.search.model ?? "gpt-6-luna",
-          timeoutMs: existingConfig?.search.timeoutMs ?? 30_000,
-          live: existingConfig?.search.live ?? false,
-        },
-      });
-
-      ctx.ui.notify(
-        "Saved ~/.pi/agent/sub2api.json (0600). Run /reload (or restart Pi) to activate the new config.",
-        "info",
-      );
     },
   });
 }

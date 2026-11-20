@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const CONFIG_FILE = "sub2api.json";
@@ -26,7 +25,6 @@ export interface Sub2ApiConfig {
   include: string[];
   exclude: string[];
   autoRefreshHours: number;
-  statusBar: boolean;
   search: SearchConfig;
 }
 
@@ -161,8 +159,6 @@ export function parseSub2ApiConfig(
     providerSection.autoRefreshHours >= 0
       ? providerSection.autoRefreshHours
       : 24;
-  const statusBar =
-    typeof providerSection?.statusBar === "boolean" ? providerSection.statusBar : false;
 
   const searchSection = asObject(parsed.search) ?? asObject(baseObj.search);
   const searchEnabled =
@@ -195,7 +191,6 @@ export function parseSub2ApiConfig(
     include,
     exclude,
     autoRefreshHours,
-    statusBar,
     search: {
       enabled: searchEnabled,
       endpoint: searchEndpoint,
@@ -220,21 +215,4 @@ export async function readSub2ApiConfig(configPath = getConfigPath()): Promise<S
     throw new Error(`Cannot read ${CONFIG_FILE}`);
   }
   return parseSub2ApiConfig(raw);
-}
-
-/**
- * Atomically writes ~/.pi/agent/sub2api.json with 0600 permissions.
- */
-export async function writeSub2ApiConfig(
-  payload: Record<string, unknown>,
-  configPath = getConfigPath(),
-): Promise<void> {
-  await mkdir(dirname(configPath), { recursive: true });
-  const tempPath = `${configPath}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    await rename(tempPath, configPath);
-  } finally {
-    await rm(tempPath, { force: true }).catch(() => undefined);
-  }
 }
