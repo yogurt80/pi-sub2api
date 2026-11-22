@@ -8,6 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { asObject, redactToken, type Sub2ApiConfig } from "../config.js";
 import {
   disambiguateModelNames,
+  fetchCodexManifest,
   getCatalogPath,
   loadOfficialMetadata,
   matchesAnyPattern,
@@ -20,12 +21,6 @@ import {
   type Sub2ApiCatalogSnapshot,
 } from "./catalog.js";
 import {
-  buildCodexModel,
-  createCodexStreams,
-  fetchCodexManifest,
-  isCodexModel,
-} from "./codex.js";
-import {
   buildAntigravityModel,
   buildAntigravityVirtualGroups,
   createAntigravityVirtualModel,
@@ -36,6 +31,7 @@ import {
 } from "./antigravity.js";
 
 const EFFORT_SUFFIX = /-(?:low|medium|high|xhigh|disabled)$/i;
+const CODEX_MODEL_PATTERN = /^(?:chatgpt|codex|gpt|o\d)(?:-|$)/i;
 
 interface CatalogSummary {
   visibleCount: number;
@@ -93,7 +89,6 @@ export async function fetchCatalogSnapshot(
 
 export interface BuiltProviderCatalog {
   physicalModels: ChatModel[];
-  antigravityModels: ChatModel[];
   virtualGroups: VariantGroup[];
   hiddenPhysicalIds: Set<string>;
   visibleCount: number;
@@ -140,37 +135,25 @@ export function buildProviderCatalog(
   }
 
   const physicalModels: ChatModel[] = [];
-  const antigravityModels: ChatModel[] = [];
 
   for (const id of orderedIds) {
     if (!shouldKeepModelId(id, config.include, config.exclude)) continue;
+    if (!antigravitySet.has(id) && CODEX_MODEL_PATTERN.test(id) && !/^gpt-oss-/i.test(id)) continue;
+    if (isAntigravityExcluded(id) || /^(?:gpt-image|codex-auto-review$)/i.test(id)) continue;
+
     const manifest = manifestById.get(id);
-
-    if (isCodexModel(id, antigravitySet)) {
-      physicalModels.push(buildCodexModel(config.providerId, id, manifest, official, config.apiBase));
-      continue;
-    }
-    if (isAntigravityExcluded(id)) continue;
-    // Skip non-chat OpenAI models like gpt-image-* or codex-auto-review
-    if (/^(?:gpt-image|codex-auto-review$)/i.test(id)) continue;
-    // Skip unbacked Sub2API placeholder entries when configured
     if (config.hidePlaceholders && isManifestPlaceholder(manifest)) continue;
-
-    const model = buildAntigravityModel(
+    physicalModels.push(buildAntigravityModel(
       config.providerId,
       id,
       manifest,
       official,
       config.root,
       config.apiBase,
-    );
-    physicalModels.push(model);
-    antigravityModels.push(model);
+    ));
   }
 
-  const virtualGroups = config.foldVariants
-    ? buildAntigravityVirtualGroups(antigravityModels, new Set(physicalModels.map((m) => m.id)))
-    : [];
+  const virtualGroups = config.foldVariants ? buildAntigravityVirtualGroups(physicalModels) : [];
 
   const hiddenPhysicalIds = new Set<string>();
   if (config.foldVariants && config.hideFoldedVariants) {
@@ -189,7 +172,6 @@ export function buildProviderCatalog(
 
   return {
     physicalModels,
-    antigravityModels,
     virtualGroups,
     hiddenPhysicalIds,
     visibleCount,
@@ -199,11 +181,11 @@ export function buildProviderCatalog(
 export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiConfig): Promise<void> {
   const catalogPath = getCatalogPath();
   const official = await loadOfficialMetadata();
-  const codexStreams = createCodexStreams(config.token);
   const anthropicApi = anthropicMessagesApi();
   const googleApi = googleGenerativeAIApi();
   const responsesApi = openAIResponsesApi();
 
+  let registeredProvider = false;
   let registeredVirtualIds = new Set<string>();
   let hasCatalog = false;
   let lastSnapshotFetchedAt = 0;
@@ -215,8 +197,6 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
       physicalCount: built.physicalModels.length,
       virtualCount: built.virtualGroups.length,
     };
-    if (!built.physicalModels.length) return summary;
-
     hasCatalog = true;
     lastSnapshotFetchedAt = snapshot.fetchedAt;
 
@@ -231,6 +211,13 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
           // Ignore if already removed
         }
       }
+    }
+
+    if (!built.physicalModels.length) {
+      if (registeredProvider) pi.unregisterProvider(config.providerId);
+      registeredProvider = false;
+      registeredVirtualIds = nextVirtualIds;
+      return summary;
     }
 
     const provider = createProvider<Sub2ApiApi>({
@@ -253,7 +240,6 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
           ? (models) => models.filter((m) => !built.hiddenPhysicalIds.has(m.id))
           : undefined,
       api: {
-        "openai-codex-responses": codexStreams,
         "anthropic-messages": anthropicApi,
         "google-generative-ai": googleApi,
         "openai-responses": responsesApi,
@@ -261,6 +247,7 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
     });
 
     pi.registerProvider(provider);
+    registeredProvider = true;
 
     for (const group of built.virtualGroups) {
       pi.registerVirtualModel(
@@ -281,9 +268,6 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
     try {
       const snapshot = await fetchCatalogSnapshot(config, signal);
       const summary = applySnapshot(snapshot);
-      if (!summary.physicalCount) {
-        throw new Error("Sub2API returned no chat models");
-      }
       await saveCatalogSnapshot(snapshot, catalogPath);
       return summary;
     } finally {
@@ -315,9 +299,9 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
     if (needsInitial || isStale) {
       void runRefresh()
         .then((summary) => {
-          if (summary && needsInitial && ctx.hasUI) {
+          if (summary?.visibleCount && needsInitial && ctx.hasUI) {
             ctx.ui.notify(
-              `Loaded ${summary.visibleCount} Sub2API models (${summary.virtualCount} folded).`,
+              `Loaded ${summary.visibleCount} Antigravity models (${summary.virtualCount} folded).`,
               "info",
             );
           }
@@ -325,17 +309,17 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
         .catch((error) => {
           if (needsInitial && ctx.hasUI) {
             const msg = redactToken(error instanceof Error ? error.message : String(error), config.token);
-            ctx.ui.notify(`Sub2API initial model fetch failed: ${msg}. Run /sub2api-refresh to retry.`, "warning");
+            ctx.ui.notify(`Antigravity model fetch failed: ${msg}. Run /sub2api-refresh to retry.`, "warning");
           }
         });
     }
   });
 
   pi.registerCommand("sub2api-refresh", {
-    description: "Fetch and refresh Sub2API Codex & Antigravity model catalog",
+    description: "Fetch and refresh the Sub2API Antigravity model catalog",
     handler: async (_args, ctx) => {
       if (refreshing) {
-        ctx.ui.notify("Sub2API model refresh is already running.", "info");
+        ctx.ui.notify("Antigravity model refresh is already running.", "info");
         return;
       }
       try {
@@ -345,11 +329,11 @@ export async function registerSub2ApiProvider(pi: ExtensionAPI, config: Sub2ApiC
           summary.virtualCount > 0
             ? `${summary.visibleCount} visible (${summary.physicalCount} physical, ${summary.virtualCount} folded)`
             : `${summary.visibleCount} models`;
-        ctx.ui.notify(`Refreshed Sub2API catalog: ${details}.`, "info");
+        ctx.ui.notify(`Refreshed Antigravity catalog: ${details}.`, "info");
       } catch (error) {
         const raw = error instanceof Error ? error.message : "Unknown error";
         const message = redactToken(raw, config.token);
-        ctx.ui.notify(`Sub2API model refresh failed. ${message}`, "error");
+        ctx.ui.notify(`Antigravity model refresh failed. ${message}`, "error");
       }
     },
   });

@@ -3,7 +3,7 @@
 Unified [Pi](https://pi.dev) extension for Sub2API gateways:
 
 - **Native Pi Provider (`src/provider/`)**:
-  - **Codex channel (`codex.ts`)**: Reads upstream `/backend-api/codex/models` limits & reasoning levels, merges Pi's offline official catalog (including `promptCache` and `thinkingLevelMap`), and streams via Pi's native `openai-codex-responses` adapter.
+  - **Codex channel (`codex.ts`)**: Routes Pi's built-in `openai-codex` provider to Sub2API's `/v1/responses` using the gateway key and Pi's native Codex adapter over SSE. Pi supplies the entire model catalog and its capability metadata.
   - **Antigravity channel (`antigravity.ts`)**: Routes Gemini via `google-generative-ai` (`/antigravity/v1beta`), Claude via `anthropic-messages` (`/antigravity`), and other models via `openai-responses`. Automatically folds `-low`/`-medium`/`-high`/`-xhigh`/`-disabled` variants into Pi native virtual models, hides folded physical variants from `/model`, skips unbacked placeholder entries, and preserves tool-loop `continuation` stickiness for prompt cache & thinking signature stability.
 - **Standalone Codex Search (`src/search/`)**: Registers `codex-search` and `codex-browse` (open, in-page `pattern` find, and numbered `click_id` follow) reusing the same Sub2API `baseURL` and `token`, with parallel execution, bounded result counts, and 429/5xx retry.
 
@@ -41,7 +41,9 @@ pi install git:github.com/yogurt80/pi-sub2api
 - `token` supports literal keys or environment references (`"$SUB2API_TOKEN"` / `"${SUB2API_TOKEN}"`, or falls back to `SUB2API_TOKEN`).
 - `baseURL` requires `https://` (or `http://` for `localhost` / `127.0.0.1`).
 
-Run `/sub2api-refresh` in Pi to fetch and cache the latest model catalog (`~/.pi/agent/sub2api-catalog.json`).
+Select `openai-codex/<model>` for Codex. Pi lists its full Codex catalog, and the gateway group determines which models it serves. Use `pi update --models` to refresh Pi's catalog. If a saved Pi OAuth login interferes with gateway access, clear the `openai-codex` login with `/logout` so Pi resolves the configured key.
+
+The `provider` settings apply to the Antigravity catalog. When `provider.id` is `openai-codex`, Antigravity uses `sub2api` instead. Run `/sub2api-refresh` to update the Antigravity catalog cache at `~/.pi/agent/sub2api-catalog.json`.
 
 ## Model viewer
 

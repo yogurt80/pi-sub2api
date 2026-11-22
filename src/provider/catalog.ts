@@ -6,27 +6,18 @@ import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { asObject } from "../config.js";
 
-export type Sub2ApiApi =
-  | "openai-codex-responses"
-  | "anthropic-messages"
-  | "google-generative-ai"
-  | "openai-responses";
-
+export type Sub2ApiApi = "anthropic-messages" | "google-generative-ai" | "openai-responses";
 export type ChatModel = Model<Sub2ApiApi>;
 
 export interface ManifestEntry {
   slug: string;
   display_name?: string;
-  description?: string;
   comp_hash?: string;
   context_window?: number;
-  max_context_window?: number;
   max_output_tokens?: number;
   max_tokens?: number;
   input_modalities?: unknown;
   supported_reasoning_levels?: unknown;
-  default_reasoning_level?: string;
-  reasoning?: boolean;
 }
 
 export interface Sub2ApiCatalogSnapshot {
@@ -43,7 +34,6 @@ export interface OfficialMetadata {
   cost?: ModelCost;
   input?: ("text" | "image")[];
   reasoning?: boolean;
-  thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
   promptCache?: Model<Api>["promptCache"];
   inputLimits?: Model<Api>["inputLimits"];
   samplingParams?: Model<Api>["samplingParams"];
@@ -58,8 +48,45 @@ export interface ParsedEfforts {
 }
 
 const CATALOG_FILE = "sub2api-catalog.json";
-const BUILTIN_PROVIDERS = ["openai-codex", "openai", "google", "anthropic"] as const;
-const STORE_PROVIDERS = ["openai-codex", "openai", "google", "anthropic", "antigravity"] as const;
+const BUILTIN_PROVIDERS = ["openai", "google", "anthropic"] as const;
+const STORE_PROVIDERS = [...BUILTIN_PROVIDERS, "antigravity"] as const;
+
+// The gateway manifest also carries limits and placeholders for Antigravity entries.
+export async function fetchCodexManifest(
+  root: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<ManifestEntry[]> {
+  const timeout = AbortSignal.timeout(15_000);
+  const response = await fetch(`${root}/backend-api/codex/models`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    redirect: "error",
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  if (!response.ok) {
+    throw new Error(`Codex manifest fetch failed (HTTP ${response.status})`);
+  }
+  const payload = asObject(await response.json().catch(() => undefined));
+  if (!Array.isArray(payload?.models)) {
+    throw new Error("Codex manifest returned an invalid payload");
+  }
+  const entries: ManifestEntry[] = [];
+  for (const raw of payload.models) {
+    const obj = asObject(raw);
+    if (!obj || typeof obj.slug !== "string" || !obj.slug.trim()) continue;
+    entries.push({
+      slug: obj.slug.trim(),
+      display_name: typeof obj.display_name === "string" ? obj.display_name : undefined,
+      comp_hash: typeof obj.comp_hash === "string" ? obj.comp_hash : undefined,
+      context_window: positiveInt(obj.context_window),
+      max_output_tokens: positiveInt(obj.max_output_tokens),
+      max_tokens: positiveInt(obj.max_tokens),
+      input_modalities: obj.input_modalities,
+      supported_reasoning_levels: obj.supported_reasoning_levels,
+    });
+  }
+  return entries;
+}
 
 export function positiveInt(...values: unknown[]): number | undefined {
   return values.find(
@@ -111,9 +138,6 @@ function extractOfficialMetadata(model: Record<string, unknown>): OfficialMetada
   if (typeof model.reasoning === "boolean") {
     meta.reasoning = model.reasoning;
   }
-  if (asObject(model.thinkingLevelMap)) {
-    meta.thinkingLevelMap = model.thinkingLevelMap as Model<Api>["thinkingLevelMap"];
-  }
   if (asObject(model.promptCache)) {
     meta.promptCache = model.promptCache as Model<Api>["promptCache"];
   }
@@ -141,8 +165,8 @@ export async function loadOfficialMetadata(agentDir = getAgentDir()): Promise<Me
   for (const provider of BUILTIN_PROVIDERS) {
     const map = new Map<string, OfficialMetadata>();
     try {
-      for (const m of getBuiltinModels(provider as never)) {
-        map.set(m.id, extractOfficialMetadata(m as unknown as Record<string, unknown>));
+      for (const model of getBuiltinModels(provider)) {
+        map.set(model.id, model);
       }
     } catch {
       // Ignore unavailable builtin provider
