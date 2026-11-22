@@ -1,7 +1,7 @@
 {
   "name": "pi-sub2api",
   "version": "1.0.0",
-  "description": "Sub2API provider (Codex + Antigravity with virtual model folding) and standalone Codex web search for Pi coding agent",
+  "description": "Sub2API bridge for Pi's native OpenAI Codex provider and standalone Codex web search",
   "main": "src/index.ts",
   "type": "module",
   "files": [
@@ -17,7 +17,6 @@
     "pi-extension",
     "sub2api",
     "codex",
-    "antigravity",
     "web-search"
   ],
   "license": "MIT",

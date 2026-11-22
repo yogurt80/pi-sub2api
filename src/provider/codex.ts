@@ -1,7 +1,7 @@
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export const CODEX_PROVIDER_ID = "openai-codex";
+const CODEX_PROVIDER_ID = "openai-codex";
 
 const account = Buffer.from(
   JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "sub2api" } }),

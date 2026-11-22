@@ -14,17 +14,8 @@ export interface SearchConfig {
 }
 
 export interface Sub2ApiConfig {
-  providerId: string;
-  root: string;
   apiBase: string;
   token: string;
-  foldVariants: boolean;
-  hideFoldedVariants: boolean;
-  hidePlaceholders: boolean;
-  fallbackOnRateLimit: boolean;
-  include: string[];
-  exclude: string[];
-  autoRefreshHours: number;
   search: SearchConfig;
 }
 
@@ -32,18 +23,10 @@ type JsonObject = Record<string, unknown>;
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
-export function asObject(value: unknown): JsonObject | undefined {
+function asObject(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : undefined;
-}
-
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 /**
@@ -108,7 +91,6 @@ export function parseSub2ApiConfig(
 
   // Support unified flat format or legacy `{ "sub2api": { baseURL, token } }`
   let baseObj: JsonObject = parsed;
-  let defaultProviderId = "sub2api";
   if (typeof parsed.baseURL !== "string") {
     const legacyKey = Object.keys(parsed).find((k) => {
       const entry = asObject(parsed![k]);
@@ -116,7 +98,6 @@ export function parseSub2ApiConfig(
     });
     if (legacyKey) {
       baseObj = asObject(parsed[legacyKey])!;
-      defaultProviderId = legacyKey;
     }
   }
 
@@ -135,30 +116,7 @@ export function parseSub2ApiConfig(
     );
   }
 
-  const root = normalizeRoot(baseURL);
-  const apiBase = `${root}/v1`;
-
-  const providerSection = asObject(parsed.provider) ?? asObject(baseObj.provider);
-  const providerId =
-    typeof providerSection?.id === "string" && providerSection.id.trim()
-      ? providerSection.id.trim()
-      : defaultProviderId;
-  const foldVariants =
-    typeof providerSection?.foldVariants === "boolean" ? providerSection.foldVariants : true;
-  const hideFoldedVariants =
-    typeof providerSection?.hideFoldedVariants === "boolean" ? providerSection.hideFoldedVariants : true;
-  const hidePlaceholders =
-    typeof providerSection?.hidePlaceholders === "boolean" ? providerSection.hidePlaceholders : true;
-  const fallbackOnRateLimit =
-    typeof providerSection?.fallbackOnRateLimit === "boolean" ? providerSection.fallbackOnRateLimit : false;
-  const include = asStringArray(providerSection?.include);
-  const exclude = asStringArray(providerSection?.exclude);
-  const autoRefreshHours =
-    typeof providerSection?.autoRefreshHours === "number" &&
-    Number.isFinite(providerSection.autoRefreshHours) &&
-    providerSection.autoRefreshHours >= 0
-      ? providerSection.autoRefreshHours
-      : 24;
+  const apiBase = `${normalizeRoot(baseURL)}/v1`;
 
   const searchSection = asObject(parsed.search) ?? asObject(baseObj.search);
   const searchEnabled =
@@ -180,17 +138,8 @@ export function parseSub2ApiConfig(
   const searchLive = Boolean(searchSection?.live);
 
   return {
-    providerId,
-    root,
     apiBase,
     token: cleanToken,
-    foldVariants,
-    hideFoldedVariants,
-    hidePlaceholders,
-    fallbackOnRateLimit,
-    include,
-    exclude,
-    autoRefreshHours,
     search: {
       enabled: searchEnabled,
       endpoint: searchEndpoint,
