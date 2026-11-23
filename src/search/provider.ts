@@ -1,142 +1,45 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import { redactToken, type SearchConfig } from "../config.js";
-import { serializeWebRunPayload, type WebRunCommand } from "./commands.js";
+import type { SearchCommands } from "./commands.js";
 
-export type SearchResult = {
-  type?: string;
-  ref_id?: string;
-  url?: string;
-  title?: string;
-  snippet?: string;
-  domain?: string;
-  image_url?: string;
-};
+const OUTPUT_TOKENS = { short: 750, medium: 1_500, long: 3_000 };
 
-const RESULT_FIELDS = ["type", "ref_id", "url", "title", "snippet", "domain", "image_url"] as const;
-
-function parseSearchResults(value: unknown): SearchResult[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item: unknown) => {
-    if (!item || typeof item !== "object") return [];
-    const entry = item as Record<string, unknown>;
-    const result: SearchResult = {};
-    for (const key of RESULT_FIELDS) {
-      const field = entry[key];
-      if (typeof field === "string" && field.trim()) result[key] = field;
-    }
-    return Object.keys(result).length ? [result] : [];
-  });
-}
-
-export interface SearchResponse {
-  output?: string;
-  results: SearchResult[];
-}
-
-export interface WebSearchProvider {
-  execute(
-    command: WebRunCommand,
-    signalOrOptions?: AbortSignal | { sessionId?: string },
-    maybeSignal?: AbortSignal,
-  ): Promise<SearchResponse>;
-}
-
-function parseRetryAfterMs(headerValue: string | null): number | undefined {
-  if (!headerValue) return undefined;
-  const seconds = Number(headerValue.trim());
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.min(3_000, Math.round(seconds * 1_000));
-  }
-  const dateMs = Date.parse(headerValue);
-  if (Number.isFinite(dateMs)) {
-    const delta = dateMs - Date.now();
-    if (delta >= 0) return Math.min(3_000, delta);
-  }
-  return undefined;
-}
-
-export class CodexWebSearchProvider implements WebSearchProvider {
-  constructor(private readonly config: SearchConfig) {}
-
-  async execute(
-    command: WebRunCommand,
-    signalOrOptions?: AbortSignal | { sessionId?: string },
-    maybeSignal?: AbortSignal,
-  ): Promise<SearchResponse> {
-    const signal = signalOrOptions instanceof AbortSignal ? signalOrOptions : maybeSignal;
-    const sessionId =
-      (signalOrOptions instanceof AbortSignal ? undefined : signalOrOptions?.sessionId) ?? "search_default";
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(
-      () => controller.abort(new Error(`Search request timed out after ${this.config.timeoutMs}ms`)),
-      this.config.timeoutMs,
-    );
-    const onExternalAbort = () => controller.abort(signal?.reason);
-    if (signal) {
-      if (signal.aborted) {
-        clearTimeout(timeoutId);
-        throw signal.reason ?? new Error("Request cancelled");
-      }
-      signal.addEventListener("abort", onExternalAbort, { once: true });
-    }
-
-    const payload = serializeWebRunPayload(command, {
-      sessionId,
-      model: this.config.model,
-      live: this.config.live,
-    });
-    const headers = {
-      Authorization: `Bearer ${this.config.token}`,
+export async function requestSearch(
+  config: SearchConfig,
+  id: string,
+  commands: SearchCommands,
+  signal?: AbortSignal,
+): Promise<{ output: string; results: JsonValue[] }> {
+  const responseLength = commands.response_length ?? "short";
+  const timeout = AbortSignal.timeout(Math.trunc(config.timeoutMs));
+  const response = await fetch(config.endpoint, {
+    method: "POST",
+    redirect: "error",
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    headers: {
+      Authorization: `Bearer ${config.token}`,
       "Content-Type": "application/json",
       Originator: "codex_cli_rs",
       "User-Agent": "codex_cli_rs/1.0",
-    };
+    },
+    body: JSON.stringify({
+      id,
+      model: config.model,
+      commands: { ...commands, response_length: responseLength },
+      // A token cap can cut off the target line when the server starts its excerpt earlier.
+      ...(commands.open?.some(({ lineno }) => lineno !== undefined)
+        ? {}
+        : { max_output_tokens: OUTPUT_TOKENS[responseLength] }),
+      settings: { search_context_size: "low", external_web_access: config.live },
+    }),
+  });
 
-    try {
-      const body = JSON.stringify(payload);
-      let retryDelayMs = 0;
-      for (let attempt = 1; ; attempt++) {
-        if (retryDelayMs > 0) await sleep(retryDelayMs, undefined, { signal: controller.signal });
-
-        let response: Response;
-        try {
-          response = await fetch(this.config.endpoint, {
-            method: "POST",
-            headers,
-            body,
-            redirect: "error",
-            signal: controller.signal,
-          });
-        } catch (err) {
-          if (controller.signal.aborted || attempt === 3) throw err;
-          retryDelayMs = 500 * attempt;
-          continue;
-        }
-
-        if (attempt < 3 && [429, 502, 503, 504].includes(response.status)) {
-          retryDelayMs = parseRetryAfterMs(response.headers.get("retry-after")) ?? 500 * attempt;
-          await response.body?.cancel().catch(() => {});
-          continue;
-        }
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw new Error(`[HTTP ${response.status}] ${redactToken(text, this.config.token).slice(0, 300)}`);
-        }
-
-        const result = (await response.json()) as Record<string, unknown> | null;
-        return {
-          output: typeof result?.output === "string" ? result.output : undefined,
-          results: parseSearchResults(result?.results),
-        };
-      }
-    } catch (err) {
-      const reason = controller.signal.aborted ? controller.signal.reason : err;
-      const message = reason instanceof Error ? reason.message : String(reason);
-      throw new Error(redactToken(message, this.config.token));
-    } finally {
-      clearTimeout(timeoutId);
-      if (signal) signal.removeEventListener("abort", onExternalAbort);
-    }
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`[HTTP ${response.status}] ${redactToken(text, config.token).slice(0, 300)}`);
   }
+
+  const body = (await response.json()) as { output?: JsonValue; results?: JsonValue } | null;
+  if (typeof body?.output !== "string") throw new Error("Codex search response has no text output.");
+  return { output: body.output, results: Array.isArray(body.results) ? body.results : [] };
 }
