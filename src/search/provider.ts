@@ -9,7 +9,24 @@ export type SearchResult = {
   title?: string;
   snippet?: string;
   domain?: string;
+  image_url?: string;
 };
+
+const RESULT_FIELDS = ["type", "ref_id", "url", "title", "snippet", "domain", "image_url"] as const;
+
+function parseSearchResults(value: unknown): SearchResult[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: unknown) => {
+    if (!item || typeof item !== "object") return [];
+    const entry = item as Record<string, unknown>;
+    const result: SearchResult = {};
+    for (const key of RESULT_FIELDS) {
+      const field = entry[key];
+      if (typeof field === "string" && field.trim()) result[key] = field;
+    }
+    return Object.keys(result).length ? [result] : [];
+  });
+}
 
 export interface SearchResponse {
   output?: string;
@@ -77,61 +94,46 @@ export class CodexWebSearchProvider implements WebSearchProvider {
     };
 
     try {
-      let response: Response | null = null;
-      let lastErr: unknown;
+      const body = JSON.stringify(payload);
       let retryDelayMs = 0;
+      for (let attempt = 1; ; attempt++) {
+        if (retryDelayMs > 0) await sleep(retryDelayMs, undefined, { signal: controller.signal });
 
-      for (let attempt = 0; attempt <= 2; attempt++) {
-        if (attempt > 0) {
-          await sleep(retryDelayMs || 500 * attempt, undefined, { signal: controller.signal });
-          retryDelayMs = 0;
-        }
+        let response: Response;
         try {
           response = await fetch(this.config.endpoint, {
             method: "POST",
             headers,
-            body: JSON.stringify(payload),
+            body,
             redirect: "error",
             signal: controller.signal,
           });
-          if (
-            response.status === 429 ||
-            response.status === 502 ||
-            response.status === 503 ||
-            response.status === 504
-          ) {
-            retryDelayMs = parseRetryAfterMs(response.headers.get("retry-after")) ?? 500 * (attempt + 1);
-            continue;
-          }
-          break;
         } catch (err) {
-          lastErr = err;
-          if (controller.signal.aborted) throw err;
+          if (controller.signal.aborted || attempt === 3) throw err;
+          retryDelayMs = 500 * attempt;
+          continue;
         }
+
+        if (attempt < 3 && [429, 502, 503, 504].includes(response.status)) {
+          retryDelayMs = parseRetryAfterMs(response.headers.get("retry-after")) ?? 500 * attempt;
+          await response.body?.cancel().catch(() => {});
+          continue;
+        }
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(`[HTTP ${response.status}] ${redactToken(text, this.config.token).slice(0, 300)}`);
+        }
+
+        const result = (await response.json()) as Record<string, unknown> | null;
+        return {
+          output: typeof result?.output === "string" ? result.output : undefined,
+          results: parseSearchResults(result?.results),
+        };
       }
-
-      if (!response) {
-        const msg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? "No response received");
-        throw new Error(redactToken(msg, this.config.token));
-      }
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new Error(redactToken(`[HTTP ${response.status}] ${text.slice(0, 300)}`, this.config.token));
-      }
-
-      const body = (await response.json()) as Record<string, unknown>;
-      const results: SearchResult[] = Array.isArray(body?.results) ? (body.results as SearchResult[]) : [];
-
-      return {
-        output: typeof body?.output === "string" ? body.output : undefined,
-        results,
-      };
     } catch (err) {
-      if (err instanceof Error) {
-        err.message = redactToken(err.message, this.config.token);
-      }
-      throw err;
+      const reason = controller.signal.aborted ? controller.signal.reason : err;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      throw new Error(redactToken(message, this.config.token));
     } finally {
       clearTimeout(timeoutId);
       if (signal) signal.removeEventListener("abort", onExternalAbort);

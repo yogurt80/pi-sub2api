@@ -3,7 +3,7 @@ import { Type, type Static } from "@sinclair/typebox";
 export const SearchQueryItem = Type.Object({
   q: Type.String({ description: "Search keywords or natural language query" }),
   recency: Type.Optional(
-    Type.Number({ description: "Limit results to the past N days (e.g. 1 for today, 7 for past week)" }),
+    Type.Number({ description: "Web search only. Limit results to the past N days (e.g. 7 for the past week)" }),
   ),
   domains: Type.Optional(
     Type.Array(Type.String(), { description: "Filter results to specific domains (e.g. ['github.com'])" }),
@@ -34,7 +34,7 @@ export const FindItem = Type.Object({
 
 export const ResponseLengthEnum = Type.Union(
   [Type.Literal("short"), Type.Literal("medium"), Type.Literal("long")],
-  { description: "Output size: 'short' (default for search), 'medium'/'long' for in-depth research" },
+  { description: "Output size: 'short' (default), 'medium', or 'long' for a larger excerpt or more results" },
 );
 
 export const SearchTypeEnum = Type.Union([Type.Literal("web"), Type.Literal("image")], {
@@ -53,7 +53,7 @@ export type SearchToolParams = Static<typeof SearchToolParameters>;
 
 export const BrowseToolParameters = Type.Object({
   url: Type.String({
-    description: "Full http/https URL of the web page to read, search within, or click a link inside",
+    description: "Full http/https URL or page reference (e.g. turn1view0). Use the page reference from the result that showed the link ID when clicking.",
   }),
   click_id: Type.Optional(
     Type.Number({
@@ -62,7 +62,7 @@ export const BrowseToolParameters = Type.Object({
   ),
   pattern: Type.Optional(
     Type.String({
-      description: "Optional text pattern to search for within a previously opened page",
+      description: "Optional text to find within the page. Accepts a URL without opening it first.",
     }),
   ),
   lineno: Type.Optional(
@@ -85,7 +85,7 @@ export const WebRunCommandSchema = Type.Object({
 });
 
 export const ResearchToolOutputSchema = Type.Object({
-  output: Type.Optional(Type.String({ description: "Synthesized text with citation references" })),
+  output: Type.Optional(Type.String({ description: "Formatted web results or an excerpt with citation references" })),
   results: Type.Array(
     Type.Object({
       ref_id: Type.Optional(Type.String()),
@@ -94,8 +94,9 @@ export const ResearchToolOutputSchema = Type.Object({
       snippet: Type.Optional(Type.String()),
       domain: Type.Optional(Type.String()),
       type: Type.Optional(Type.String()),
+      image_url: Type.Optional(Type.String()),
     }),
-    { description: "Structured search result hits" },
+    { description: "Structured web, image, or page results" },
   ),
 });
 
@@ -120,19 +121,14 @@ export function searchParamsToWebRunCommand(params: SearchToolParams): WebRunCom
 
 export function browseParamsToWebRunCommand(params: BrowseToolParams, resolvedRefId?: string): WebRunCommand {
   const refId = resolvedRefId || params.url.trim();
+  const response_length = params.response_length ?? "short";
 
   if (typeof params.click_id === "number") {
-    return {
-      click: [{ ref_id: refId, id: params.click_id }],
-      response_length: params.response_length ?? "long",
-    };
+    return { click: [{ ref_id: refId, id: params.click_id }], response_length };
   }
 
   if (typeof params.pattern === "string" && params.pattern.trim()) {
-    return {
-      find: [{ ref_id: refId, pattern: params.pattern.trim() }],
-      response_length: params.response_length ?? "long",
-    };
+    return { find: [{ ref_id: refId, pattern: params.pattern.trim() }], response_length };
   }
 
   return {
@@ -142,7 +138,7 @@ export function browseParamsToWebRunCommand(params: BrowseToolParams, resolvedRe
         ...(typeof params.lineno === "number" ? { lineno: params.lineno } : {}),
       },
     ],
-    response_length: params.response_length ?? "long",
+    response_length,
   };
 }
 

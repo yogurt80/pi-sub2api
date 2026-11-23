@@ -1,108 +1,7 @@
-import type { JsonObject } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import type { AgentToolResult, Theme, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
-import type { SearchResponse, SearchResult } from "./provider.js";
 import type { WebRunCommand } from "./commands.js";
-
-export interface FormattedToolOutput {
-  content: Array<{ type: "text"; text: string }>;
-  structuredContent: JsonObject;
-  details: Record<string, unknown>;
-  isError?: boolean;
-}
-
-const MAX_RESULTS_BY_LENGTH: Record<"short" | "medium" | "long", number> = {
-  short: 8,
-  medium: 15,
-  long: 25,
-};
-
-export function cleanCitations(rawText: string): string {
-  if (!rawText) return "";
-
-  return rawText
-    .replace(/\uE200cite\uE202([^\uE201]*)\uE201/g, (_match, body: string) => {
-      const trimmed = body?.trim() || "";
-      if (!trimmed) return "";
-      if (trimmed.includes("†")) {
-        const parts = trimmed.split("†");
-        const id = parts[0]?.trim();
-        const label = parts[1]?.trim() || "";
-        const domain = parts[2]?.trim();
-        if (domain) {
-          return `[#${id}: ${label} (${domain})]`;
-        }
-        return label ? `[#${id}: ${label}]` : `[#${id}]`;
-      }
-      if (/^\d+$/.test(trimmed)) {
-        return `[#${trimmed}]`;
-      }
-      return `[${trimmed}]`;
-    })
-    .replace(/[\uE200-\uE202]/g, "");
-}
-
-function formatSearchResults(results: SearchResult[], maxItems: number): string {
-  const shown = results.slice(0, maxItems);
-  const body = shown
-    .map((item, idx) => {
-      const num = idx + 1;
-      const title = item.title || item.url || `Result ${num}`;
-      const urlLine = item.url ? `URL: ${item.url}\n` : "";
-      const snippetLine = item.snippet ?? "";
-      return `[${num}] ${title}\n${urlLine}${snippetLine}`.trim();
-    })
-    .join("\n\n");
-
-  if (results.length > shown.length) {
-    return `${body}\n\n(Showing ${shown.length} of ${results.length} results; pass response_length="medium" or "long" for more.)`;
-  }
-  return body;
-}
-
-export function formatWebToolResult(command: WebRunCommand, response: SearchResponse): FormattedToolOutput {
-  const responseLength = command.response_length ?? "short";
-  const maxItems = MAX_RESULTS_BY_LENGTH[responseLength];
-  const isSearchAction = Boolean(command.search_query?.length || command.image_query?.length);
-
-  let primaryText = "";
-  if (isSearchAction && response.results && response.results.length > 0) {
-    primaryText = formatSearchResults(response.results, maxItems);
-  } else if (typeof response.output === "string" && response.output.trim().length > 0) {
-    primaryText = cleanCitations(response.output.trim());
-  } else if (response.results && response.results.length > 0) {
-    primaryText = formatSearchResults(response.results, maxItems);
-  } else {
-    primaryText = "No output or structured web results returned.";
-  }
-
-  const boundedResults = isSearchAction ? response.results.slice(0, maxItems) : response.results;
-  const structuredResults = boundedResults.map((r) => {
-    const entry: JsonObject = {};
-    if (r.ref_id !== undefined) entry.ref_id = r.ref_id;
-    if (r.url !== undefined) entry.url = r.url;
-    if (r.title !== undefined) entry.title = r.title;
-    if (r.snippet !== undefined) entry.snippet = r.snippet;
-    if (r.domain !== undefined) entry.domain = r.domain;
-    if (r.type !== undefined) entry.type = r.type;
-    return entry;
-  });
-  const structuredContent: JsonObject = {
-    ...(response.output !== undefined ? { output: response.output } : {}),
-    results: structuredResults,
-  };
-
-  return {
-    content: [{ type: "text", text: primaryText }],
-    structuredContent,
-    details: {
-      command,
-      results: response.results,
-      rawOutput: response.output,
-    },
-  };
-}
 
 export interface SearchQueryLike {
   q?: string;
@@ -152,7 +51,9 @@ export function describeCommandStatus(command: WebRunCommand): string {
 
 interface SearchDetails {
   query?: string;
-  results?: SearchResult[];
+  resultCount?: number;
+  results?: unknown[];
+  error?: string;
   command?: {
     search_query?: Array<SearchQueryLike>;
     image_query?: Array<SearchQueryLike>;
@@ -167,13 +68,15 @@ const MAX_COLLAPSED_LINES = 6;
 export function makeWebToolCallRenderer(toolName: string) {
   return (args: Record<string, unknown>, theme: Theme): Component => {
     const isSearch = toolName.includes("search");
+    const isImage = args.type === "image";
     let target = "";
 
     if (isSearch) {
-      const queries = Array.isArray(args.queries)
-        ? (args.queries as Array<SearchQueryLike | string>).map(formatQueryWithFilters).filter(Boolean)
-        : [];
-      target = queries.join(", ");
+      const queries = Array.isArray(args.queries) ? (args.queries as Array<SearchQueryLike | string>) : [];
+      target = queries.map((query) => {
+        const displayQuery = isImage && typeof query !== "string" ? { ...query, recency: undefined } : query;
+        return formatQueryWithFilters(displayQuery);
+      }).join(", ");
     } else {
       const urlStr = typeof args.url === "string" ? args.url : "";
       const suffixes: string[] = [];
@@ -186,7 +89,6 @@ export function makeWebToolCallRenderer(toolName: string) {
       target = `${urlStr}${suffix}`;
     }
 
-    const isImage = args.type === "image";
     const actionLabel = isSearch ? (isImage ? "search images " : "search ") : "browse ";
     const label = theme.fg("toolTitle", theme.bold(actionLabel));
     const argText = target ? theme.fg("accent", target) : "";
@@ -202,14 +104,14 @@ export function makeWebToolRenderer(title: string) {
   ): Component => {
     const details = (result.details ?? {}) as SearchDetails;
 
-    if (result.isError) {
+    if (result.isError || details.error) {
       const text = result.content?.[0]?.type === "text" ? result.content[0].text : "Web search failed.";
       return new Text(theme.fg("error", text ?? "Web search failed."), 0, 0);
     }
 
     try {
       const expanded = options.expanded;
-      const results = details.results ?? [];
+      const resultCount = details.resultCount ?? details.results?.length ?? 0;
       const query =
         details.query ??
         (details.command?.search_query && details.command.search_query.map(formatQueryWithFilters).join(", ")) ??
@@ -224,8 +126,8 @@ export function makeWebToolRenderer(title: string) {
       const icon = (theme as { status?: { success?: string } }).status?.success ?? "✓";
       const label = theme.fg("toolTitle", theme.bold(title));
       const count =
-        results.length > 0
-          ? theme.fg("muted", `\u00b7 ${results.length} source${results.length === 1 ? "" : "s"}`)
+        resultCount > 0
+          ? theme.fg("muted", `\u00b7 ${resultCount} source${resultCount === 1 ? "" : "s"}`)
           : "";
       const lines: string[] = [`${theme.fg("accent", icon)} ${label}${count ? " " + count : ""}`];
 
