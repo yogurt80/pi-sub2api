@@ -1,19 +1,22 @@
 import { Type, type Static } from "@sinclair/typebox";
 
-const ResponseLength = Type.Union([Type.Literal("short"), Type.Literal("medium"), Type.Literal("long")], {
-  description: "Server output size. Defaults to short.",
+const ResponseLength = Type.Unsafe<"short" | "medium" | "long">({
+  type: "string",
+  enum: ["short", "medium", "long"],
+  description: "Page excerpt size. Defaults to short.",
 });
 
 const Query = Type.Object({
-  q: Type.String({ minLength: 1, description: "Search query" }),
+  q: Type.String({ minLength: 1, description: "Topic and keywords. Put site restrictions in domains." }),
   recency: Type.Optional(Type.Integer({ minimum: 1, description: "Limit results to the past N days" })),
-  domains: Type.Optional(Type.Array(Type.String(), { description: "Filter results to these domains" })),
+  domains: Type.Optional(Type.Array(Type.String(), {
+    description: "Bare domain names.",
+  })),
 });
 
 export const SearchToolParameters = Type.Object({
-  queries: Type.Array(Query, { minItems: 1 }),
-  type: Type.Optional(Type.Union([Type.Literal("web"), Type.Literal("image")])),
-  response_length: Type.Optional(ResponseLength),
+  queries: Type.Array(Query, { minItems: 1, maxItems: 3, description: "Start with one query. Add distinct queries only when useful." }),
+  type: Type.Optional(Type.Unsafe<"web" | "image">({ type: "string", enum: ["web", "image"] })),
 });
 
 export const BrowseToolParameters = Type.Object({

@@ -27,7 +27,7 @@ export async function requestSearch(
       model: config.model,
       commands: { ...commands, response_length: responseLength },
       max_output_tokens: MAX_OUTPUT_TOKENS,
-      settings: { search_context_size: "low", external_web_access: config.live },
+      settings: { search_context_size: "low", external_web_access: config.live, allowed_callers: ["direct"] },
     }),
   });
 

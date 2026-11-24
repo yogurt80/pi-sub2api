@@ -93,7 +93,7 @@
 | `weather` | `{ location: string, start?: string, duration?: u64 }[]` | 天气预报查询（`location` 格式 `"Country, Area, City"`，`start` 格式 `YYYY-MM-DD`，默认 7 天）。 |
 | `sports` | `{ tool?: "sports", fn: "schedule" \| "standings", league: "nba" \| "wnba" \| "nfl" \| "nhl" \| "mlb" \| "epl" \| "ncaamb" \| "ncaawb" \| "ipl", team?: string, opponent?: string, date_from?: string, date_to?: string, num_games?: u64, locale?: string }[]` | 体育赛程与积分榜查询。 |
 | `time` | `{ utc_offset: string }[]` | 指定时区当前时间查询（如 `"+03:00"`）。 |
-| `response_length` | `"short" \| "medium" \| "long"` | **控制返回结果条数 / 页面视口跨度，而非“把每条结果总结成简短一句话”**。上游明确要求：若意图为默认的 `"short"`，**应省略该字段不传**（`web_run_description.md:20`）。 |
+| `response_length` | `"short" \| "medium" \| "long"` | 控制结果条数、摘录篇幅或页面视口。上游提示词建议用省略表示 `short`。Sub2API 上曾实测同一条查询省略时返回 11,042 字符，显式 `short` 返回 7,098 字符，因此 Pi 显式传 `short`。 |
 
 #### `SearchQuery` 字段与网关实测规律（`search.rs:67-76`）
 
@@ -153,13 +153,13 @@ pub struct SearchResponse {
 
 对应本地文件：`src/search/commands.ts`、`src/search/provider.ts`、`src/search/index.ts`
 
-| 维度 | 上游 `openai/codex` | 当前 `pi-sub2api` (`9c75abd`) | 后续重构指引 |
-|---|---|---|---|
-| 工具拆分 | 单一命名空间工具 `web.run`（含搜索、浏览、金融、天气等） | 拆分为 `codex-search` 与 `codex-browse` | **保持现状**：契合编码 Agent 工具职责划分，参数更直观 |
-| `max_output_tokens` | 传全局工具输出安全上限（约 `10,000` tokens） | 绑定 `response_length` 硬编码为 `750 / 1500 / 3000`（`provider.ts:5,30`） | **重点修复**：移除按档位小额截断，改为统一安全上限（`open` 带 `lineno` 继续不传），避免断句与吞掉多 query 结果 |
-| `commands.response_length` | 默认 `"short"` 时**省略不传**；`queries.length > 3` 时须为 `"medium"` 或 `"long"` | 始终显式传 `"short"`，未处理 4 条查询升档 | **对齐上游**：默认 `"short"` 时省略字段；4 条查询时要求或自动升为 `"medium"` |
-| `queries` 数组上限 | `web_run_description.md` 限定每次最多 4 条 | Schema 仅有 `minItems: 1`，无 `maxItems` | **补齐约束**：Schema 增加 `maxItems: 4` |
-| `domains` 与 `site:` | 原生提供 `domains`，提示词要求用 `domains` 限定站点 | 无格式校验、无反模式提示，`type: "image"` 未剔除 `recency` | **输入防呆**：校验 `domains` 为裸域名（禁协议/路径），拦截 `site:domain/path` 及 `site:`+`domains` 混用，搜图剔除 `recency` |
-| PUA 引用符清洗 | 原生 Codex 模型直接消费 | 正则替换完整 `\uE200cite...\uE201`（`index.ts:19`） | **补充兜底**：追加清理截断残留的 `[\uE200-\uE202]` 字符 |
-| 系统提示词引导 | 注入完整 `web_run_description.md` | 未设置 `promptSnippet` 与 `promptGuidelines` | **补齐精简提示**：让 Pi 将工具列入 `<tools>` 与 `<rules>`（跨站分调、`domains` 裸域名、`click_id` 传 `turn…view…`） |
-| `input` 历史注入 | `recent_input()` 注入最近 2 轮纯文本对话 | 省略未传 | **保持省略**：字段本身可选，免去跨模型消息转换与额外 token 开销 |
+| 维度 | 上游 `openai/codex` | `pi-sub2api` |
+|---|---|---|
+| 工具拆分 | `web.run` | `codex-search` 搜索网页和图片，`codex-browse` 阅读已知页面、查找文本和跟随编号链接 |
+| `max_output_tokens` | 使用工具输出 token 预算 | 固定 `10,000` 作为安全上限 |
+| `commands.response_length` | 上游提示词建议省略默认 `short` | 搜索固定显式请求 `short`，浏览默认 `short` 并开放 `medium` / `long` |
+| `queries` 数组上限 | 最多 4 条，4 条时使用 `medium` 或 `long` | 最多 3 条，提示模型从 1 条开始 |
+| `domains` | 提供站点过滤字段 | 可选字符串数组，字段说明要求填写裸域名 |
+| PUA 引用符 | 原生 Codex 模型可识别 | 将完整 `\uE200cite…\uE201` 转为 `[turn…]` |
+| 工具提示词 | `web_run_description.md` | 用工具描述和参数说明表达用法 |
+| `input` / `reasoning` | `recent_input()` 提取会话内容，省略 `reasoning` | 省略两者。Sub2API 对照实测未发现稳定的相关性收益 |

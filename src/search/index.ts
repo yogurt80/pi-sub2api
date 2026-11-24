@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Static } from "@sinclair/typebox";
 import { redactToken, type SearchConfig } from "../config.js";
 import { BrowseToolParameters, SearchOutputSchema, SearchToolParameters, type SearchCommands } from "./commands.js";
 import { requestSearch } from "./provider.js";
@@ -37,9 +38,9 @@ export function registerSub2ApiSearch(pi: ExtensionAPI, config: SearchConfig): v
     outputSchema: SearchOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
     executionMode: "parallel",
-    async execute(_id, { queries, type, response_length }, signal, _onUpdate, ctx) {
+    async execute(_id, { queries, type }: Static<typeof SearchToolParameters>, signal, _onUpdate, ctx) {
       const commands = type === "image" ? { image_query: queries } : { search_query: queries };
-      return execute({ ...commands, response_length }, ctx.sessionManager.getSessionId(), signal);
+      return execute(commands, ctx.sessionManager.getSessionId(), signal);
     },
   });
 
@@ -51,7 +52,7 @@ export function registerSub2ApiSearch(pi: ExtensionAPI, config: SearchConfig): v
     outputSchema: SearchOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
     executionMode: "parallel",
-    async execute(_id, { url, click_id, pattern, lineno, response_length }, signal, _onUpdate, ctx) {
+    async execute(_id, { url, click_id, pattern, lineno, response_length }: Static<typeof BrowseToolParameters>, signal, _onUpdate, ctx) {
       const ref_id = url.trim();
       const text = pattern?.trim();
       if (!ref_id) return errorResult("Provide a URL or page reference.");
