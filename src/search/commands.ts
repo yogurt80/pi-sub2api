@@ -6,13 +6,17 @@ const ResponseLength = Type.Unsafe<"short" | "medium" | "long">({
   description: "Page excerpt size. Defaults to short.",
 });
 
-export const SearchToolParameters = Type.Object({
-  q: Type.String({ minLength: 1, description: "Search topic and keywords. Put site restrictions in domains." }),
+const Query = Type.Object({
+  q: Type.String({ minLength: 1, description: "Topic and keywords. Put site restrictions in domains." }),
   recency: Type.Optional(Type.Integer({ minimum: 1, description: "Limit results to the past N days" })),
   domains: Type.Optional(Type.Array(Type.String(), {
     description: "Bare domain names.",
   })),
-  type: Type.Optional(Type.Unsafe<"web" | "image">({ type: "string", enum: ["web", "image"], description: "Search mode. Defaults to web." })),
+});
+
+export const SearchToolParameters = Type.Object({
+  queries: Type.Array(Query, { minItems: 1, maxItems: 3, description: "Start with one query. Add distinct queries only when useful." }),
+  type: Type.Optional(Type.Unsafe<"web" | "image">({ type: "string", enum: ["web", "image"] })),
 });
 
 export const BrowseToolParameters = Type.Object({
@@ -28,7 +32,7 @@ export const SearchOutputSchema = Type.Object({
   results: Type.Array(Type.Unknown(), { description: "Structured results from Codex, when provided" }),
 });
 
-type Query = Omit<Static<typeof SearchToolParameters>, "type">;
+type Query = Static<typeof Query>;
 
 export type SearchCommands = {
   response_length?: Static<typeof ResponseLength>;

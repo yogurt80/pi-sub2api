@@ -158,7 +158,7 @@ pub struct SearchResponse {
 | 工具拆分 | `web.run` | `codex-search` 搜索网页和图片，`codex-browse` 阅读已知页面、查找文本和跟随编号链接 |
 | `max_output_tokens` | 使用工具输出 token 预算 | 固定 `10,000` 作为安全上限 |
 | `commands.response_length` | 上游提示词建议省略默认 `short` | 搜索固定显式请求 `short`，浏览默认 `short` 并开放 `medium` / `long` |
-| 每次网页搜索的查询数 | 最多 4 条，4 条时使用 `medium` 或 `long` | 工具接收单个 `q`，发送给上游时包装成单元素数组 |
+| `queries` 数组上限 | 最多 4 条，4 条时使用 `medium` 或 `long` | 最多 3 条，提示模型从 1 条开始 |
 | `domains` | 提供站点过滤字段 | 可选字符串数组，字段说明要求填写裸域名 |
 | PUA 引用符 | 原生 Codex 模型可识别 | 将完整 `\uE200cite…\uE201` 转为 `[turn…]` |
 | 工具提示词 | `web_run_description.md` | 用工具描述和参数说明表达用法 |

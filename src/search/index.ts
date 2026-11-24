@@ -33,17 +33,13 @@ export function registerSub2ApiSearch(pi: ExtensionAPI, config: SearchConfig): v
   pi.registerTool({
     name: "codex-search",
     label: "Codex Web Search",
-    description: "Search the web or images via Codex with one query. Search once first and follow up only if the results leave a specific gap.",
+    description: "Search the web or images via Codex, optionally filtering by domain or recency.",
     parameters: SearchToolParameters,
     outputSchema: SearchOutputSchema,
     annotations: { readOnlyHint: true, openWorldHint: true },
     executionMode: "parallel",
-    async execute(_id, { q, domains, recency, type }: Static<typeof SearchToolParameters>, signal, _onUpdate, ctx) {
-      const text = q.trim();
-      if (!text) return errorResult("Provide a non-empty query.");
-
-      const query = { q: text, domains, recency };
-      const commands = type === "image" ? { image_query: [query] } : { search_query: [query] };
+    async execute(_id, { queries, type }: Static<typeof SearchToolParameters>, signal, _onUpdate, ctx) {
+      const commands = type === "image" ? { image_query: queries } : { search_query: queries };
       return execute(commands, ctx.sessionManager.getSessionId(), signal);
     },
   });
