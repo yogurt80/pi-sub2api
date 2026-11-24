@@ -2,7 +2,7 @@ import type { JsonValue } from "@earendil-works/pi-ai";
 import { redactToken, type SearchConfig } from "../config.js";
 import type { SearchCommands } from "./commands.js";
 
-const OUTPUT_TOKENS = { short: 750, medium: 1_500, long: 3_000 };
+const MAX_OUTPUT_TOKENS = 10_000;
 
 export async function requestSearch(
   config: SearchConfig,
@@ -26,10 +26,7 @@ export async function requestSearch(
       id,
       model: config.model,
       commands: { ...commands, response_length: responseLength },
-      // A token cap can cut off the target line when the server starts its excerpt earlier.
-      ...(commands.open?.some(({ lineno }) => lineno !== undefined)
-        ? {}
-        : { max_output_tokens: OUTPUT_TOKENS[responseLength] }),
+      max_output_tokens: MAX_OUTPUT_TOKENS,
       settings: { search_context_size: "low", external_web_access: config.live },
     }),
   });
