@@ -3,7 +3,7 @@
 Unified [Pi](https://pi.dev) extension for Sub2API gateways:
 
 - **Native Codex provider (`src/provider/codex.ts`)** routes Pi's built-in `openai-codex` provider to Sub2API's `/v1/responses` using the gateway key and Pi's native Codex adapter over SSE. Pi supplies the entire model catalog and its capability metadata.
-- **Standalone Codex Search (`src/search/`)** registers `codex-search` and `codex-browse` through the same Sub2API gateway. Search returns `short` output and accepts up to three queries per call. Put site restrictions in `domains`, with one bare domain per entry. Browse defaults to `short` and supports `medium` and `long` for wider excerpts. Find accepts a URL directly. For numbered links, use the page reference from the result that showed the link.
+- **Standalone Codex Search (`src/search/`)** registers `codex-search` and `codex-browse` through the same Sub2API gateway. Search returns `short` output for a single `q` per call. Put site restrictions in `domains`, with one bare domain per entry. Browse defaults to `short` and supports `medium` and `long` for wider excerpts. Find accepts a URL directly. For numbered links, use the page reference from the result that showed the link.
 
 ## Install
 
