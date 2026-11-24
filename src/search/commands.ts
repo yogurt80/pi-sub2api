@@ -1,44 +1,66 @@
-import { Type, type Static } from "@sinclair/typebox";
+// TypeBox port of OpenAI Codex's codex-api/src/search.rs (see upstream/).
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
 
-const ResponseLength = Type.Unsafe<"short" | "medium" | "long">({
-  type: "string",
-  enum: ["short", "medium", "long"],
-  description: "Page excerpt size. Defaults to short.",
-});
+const text = (description: string) => Type.String({ description });
+const uint = (description: string) => Type.Integer({ minimum: 0, description });
+const choices = <T extends string>(values: T[], description: string) =>
+  Type.Unsafe<T>({ type: "string", enum: values, description });
+const list = <T extends TSchema>(item: T, description: string) => Type.Optional(Type.Array(item, { description }));
+const optional = Type.Optional;
 
 const Query = Type.Object({
-  q: Type.String({ minLength: 1, description: "Topic and keywords. Put site restrictions in domains." }),
-  recency: Type.Optional(Type.Integer({ minimum: 1, description: "Limit results to the past N days" })),
-  domains: Type.Optional(Type.Array(Type.String(), {
-    description: "Bare domain names.",
-  })),
+  q: text("Search query."),
+  recency: optional(uint("Whether to filter by recency, as a number of recent days.")),
+  domains: list(Type.String(), "Whether to filter by a specific list of domains."),
 });
 
-export const SearchToolParameters = Type.Object({
-  queries: Type.Array(Query, { minItems: 1, maxItems: 3, description: "Start with one query. Add distinct queries only when useful." }),
-  type: Type.Optional(Type.Unsafe<"web" | "image">({ type: "string", enum: ["web", "image"] })),
-});
+export function commandsSchema(supportsLiterature: boolean) {
+  return Type.Object({
+    search_query: list(Query, "Query the internet search engine for a given list of queries."),
+    ...(supportsLiterature && {
+      literature_search_query: list(Query, "Search for scientific papers. Open relevant papers and cite the primary sources you use."),
+    }),
+    image_query: list(Query, "Query the image search engine for a given list of queries."),
+    open: list(Type.Object({
+      ref_id: text("Reference id or URL to open."),
+      lineno: optional(uint("Line number to position the page at.")),
+    }), "Open pages by reference id or URL."),
+    click: list(Type.Object({
+      ref_id: text("Reference id containing the numbered link."),
+      id: uint("Numbered link id to open."),
+    }), "Open links from previously opened pages."),
+    find: list(Type.Object({
+      ref_id: text("Reference id or URL to search within."),
+      pattern: text("Text pattern to find."),
+    }), "Find text patterns in pages."),
+    screenshot: list(Type.Object({
+      ref_id: text("Reference id or URL to screenshot."),
+      pageno: uint("Zero-indexed PDF page number."),
+    }), "Take screenshots of PDF pages."),
+    finance: list(Type.Object({
+      ticker: text("Ticker symbol to look up."),
+      type: choices(["equity", "fund", "crypto", "index"], "Asset type to look up."),
+      market: optional(text('ISO 3166-1 alpha-3 country code, "OTC", or "" for cryptocurrency.')),
+    }), "Look up prices for the given stock symbols."),
+    weather: list(Type.Object({
+      location: text('Location in "Country, Area, City" format.'),
+      start: optional(text("Start date in YYYY-MM-DD format. Defaults to today.")),
+      duration: optional(uint("Number of days to return. Defaults to 7.")),
+    }), "Look up weather forecasts."),
+    sports: list(Type.Object({
+      tool: optional(choices(["sports"], "Tool name for sports requests.")),
+      fn: choices(["schedule", "standings"], "Sports function to call."),
+      league: choices(["nba", "wnba", "nfl", "nhl", "mlb", "epl", "ncaamb", "ncaawb", "ipl"], "League to look up."),
+      team: optional(text("Team to look up, using the common 3 or 4 letter alias used in broadcasts.")),
+      opponent: optional(text("Opponent to use with `team` when narrowing the lookup.")),
+      date_from: optional(text("Start date in YYYY-MM-DD format.")),
+      date_to: optional(text("End date in YYYY-MM-DD format.")),
+      num_games: optional(uint("Number of games to return.")),
+      locale: optional(text("Locale for the lookup.")),
+    }), "Look up sports schedules and standings."),
+    time: list(Type.Object({ utc_offset: text('UTC offset formatted like "+03:00".') }), "Get time for the given UTC offsets."),
+    response_length: optional(choices(["short", "medium", "long"], "Set the length of the response to be returned.")),
+  });
+}
 
-export const BrowseToolParameters = Type.Object({
-  url: Type.String({ minLength: 1, description: "HTTP(S) URL or Codex page reference. For click_id, use the reference from the result that showed the link." }),
-  click_id: Type.Optional(Type.Integer({ minimum: 0, description: "Numbered link from the referenced page" })),
-  pattern: Type.Optional(Type.String({ minLength: 1, description: "Text to find in the page. Accepts a URL directly." })),
-  lineno: Type.Optional(Type.Integer({ minimum: 0, description: "Line to open the page at" })),
-  response_length: Type.Optional(ResponseLength),
-});
-
-export const SearchOutputSchema = Type.Object({
-  output: Type.String({ description: "Formatted output from Codex" }),
-  results: Type.Array(Type.Unknown(), { description: "Structured results from Codex, when provided" }),
-});
-
-type Query = Static<typeof Query>;
-
-export type SearchCommands = {
-  response_length?: Static<typeof ResponseLength>;
-  search_query?: Query[];
-  image_query?: Query[];
-  open?: { ref_id: string; lineno?: number }[];
-  click?: { ref_id: string; id: number }[];
-  find?: { ref_id: string; pattern: string }[];
-};
+export type SearchCommands = Static<ReturnType<typeof commandsSchema>>;

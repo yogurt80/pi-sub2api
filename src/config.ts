@@ -11,6 +11,7 @@ export interface SearchConfig {
   model: string;
   timeoutMs: number;
   live: boolean;
+  includeRecentInput: boolean;
 }
 
 export interface Sub2ApiConfig {
@@ -147,6 +148,7 @@ export function parseSub2ApiConfig(
       model: searchModel,
       timeoutMs: searchTimeoutMs,
       live: searchLive,
+      includeRecentInput: searchSection?.includeRecentInput === true,
     },
   };
 }

@@ -93,7 +93,7 @@
 | `weather` | `{ location: string, start?: string, duration?: u64 }[]` | 天气预报查询（`location` 格式 `"Country, Area, City"`，`start` 格式 `YYYY-MM-DD`，默认 7 天）。 |
 | `sports` | `{ tool?: "sports", fn: "schedule" \| "standings", league: "nba" \| "wnba" \| "nfl" \| "nhl" \| "mlb" \| "epl" \| "ncaamb" \| "ncaawb" \| "ipl", team?: string, opponent?: string, date_from?: string, date_to?: string, num_games?: u64, locale?: string }[]` | 体育赛程与积分榜查询。 |
 | `time` | `{ utc_offset: string }[]` | 指定时区当前时间查询（如 `"+03:00"`）。 |
-| `response_length` | `"short" \| "medium" \| "long"` | 控制结果条数、摘录篇幅或页面视口。上游提示词建议用省略表示 `short`。Sub2API 上曾实测同一条查询省略时返回 11,042 字符，显式 `short` 返回 7,098 字符，因此 Pi 显式传 `short`。 |
+| `response_length` | `"short" \| "medium" \| "long"` | 控制结果条数、摘录篇幅或页面视口。上游提示词建议用省略表示 `short`。Sub2API 上曾实测同一条查询省略时返回 11,042 字符，显式 `short` 返回 7,098 字符，因此需要稳定比较长度的调用应显式传 `short`。 |
 
 #### `SearchQuery` 字段与网关实测规律（`search.rs:67-76`）
 
@@ -151,15 +151,14 @@ pub struct SearchResponse {
 
 ## 5. `pi-sub2api` 当前实现（`src/search/`）与上游差异对照
 
-对应本地文件：`src/search/commands.ts`、`src/search/provider.ts`、`src/search/index.ts`
+对应本地文件：`src/search/commands.ts`、`src/search/provider.ts`、`src/search/index.ts`、`src/search/history.ts`。移植基线为 [openai/codex@a0d5b0a](https://github.com/openai/codex/tree/a0d5b0a661db3b34cd87bdf1c93736b90fd3694b/codex-rs/ext/web-search)，工具描述、Apache-2.0 许可证及 NOTICE 收录于 `src/search/upstream/`。
 
 | 维度 | 上游 `openai/codex` | `pi-sub2api` |
 |---|---|---|
-| 工具拆分 | `web.run` | `codex-search` 搜索网页和图片，`codex-browse` 阅读已知页面、查找文本和跟随编号链接 |
-| `max_output_tokens` | 使用工具输出 token 预算 | 固定 `10,000` 作为安全上限 |
-| `commands.response_length` | 上游提示词建议省略默认 `short` | 搜索固定显式请求 `short`，浏览默认 `short` 并开放 `medium` / `long` |
-| `queries` 数组上限 | 最多 4 条，4 条时使用 `medium` 或 `long` | 最多 3 条，提示模型从 1 条开始 |
-| `domains` | 提供站点过滤字段 | 可选字符串数组，字段说明要求填写裸域名 |
-| PUA 引用符 | 原生 Codex 模型可识别 | 将完整 `\uE200cite…\uE201` 转为 `[turn…]` |
-| 工具提示词 | `web_run_description.md` | 用工具描述和参数说明表达用法 |
-| `input` / `reasoning` | `recent_input()` 提取会话内容，省略 `reasoning` | 省略两者。Sub2API 对照实测未发现稳定的相关性收益 |
+| 注册 | `web.run` | Pi 函数工具 `codex-web`，共用同一套命令参数，可组合操作 |
+| 模型与预算 | 当前轮次模型和工具输出预算 | 网关 `search.model`，固定 `10,000` token 上限 |
+| 长度 | 可选 `response_length`、可配置 `search_context_size` | `response_length` 按调用透传，未指定的长度和上下文大小均省略 |
+| 批量查询 | 工具说明约定每次最多 4 条 `search_query`，4 条时选 `medium` 或 `long` | 沿用上游工具说明 |
+| 学术搜索 | 按模型的 `experimental_supported_tools` 开关 | 按该提交的模型目录匹配配置的搜索模型，未知模型默认关闭 |
+| 结果 | 文本 `output` 返回模型，`results` 作为事件数据 | 原始 `output` 进入 Pi `content`，`results` 进入 `details` |
+| 对话上下文 | 自动传近期对话 | `search.includeRecentInput` 显式开启后传最近两条用户文本及其间和之后的助手文本，助手预算约 1,000 tokens |
