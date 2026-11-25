@@ -22,11 +22,11 @@ function errorMessage(message: string, token: string): string {
 export function registerSub2ApiSearch(pi: ExtensionAPI, config: SearchConfig): void {
   if (!config.enabled) return;
   const supportsLiterature = LITERATURE_MODELS.has(config.model);
-  const description = readFileSync(new URL("./upstream/web_run_description.md", import.meta.url), "utf8");
+  const description = readFileSync(new URL("./description.md", import.meta.url), "utf8").trim();
   pi.registerTool({
     name: TOOL_NAME,
     label: "Codex Web",
-    description: description.replaceAll("web.run", TOOL_NAME),
+    description,
     parameters: commandsSchema(supportsLiterature),
     executionMode: "parallel",
     annotations: { readOnlyHint: true, openWorldHint: true },
